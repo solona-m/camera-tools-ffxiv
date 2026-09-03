@@ -1,0 +1,23 @@
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
+
+  <PropertyGroup>
+    <Version>0.1.0.0</Version>
+    <Authors>Solona</Authors>
+    <Company />
+    <Description>Free camera for FFXIV that presents itself to ReShade as an IGCS camera tool, enabling iMMERSE Parallax DoF and IGCS DoF.</Description>
+    <PackageProjectUrl>https://github.com/solona/camera-tools-ffxiv</PackageProjectUrl>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- The native IGCS export shim is built separately (src/native/IgcsBridge) and
+       shipped alongside the plugin assembly; the plugin LoadLibrary's it at runtime. -->
+  <ItemGroup>
+    <None Include="..\..\build\native\Release\IgcsBridge.dll"
+          Condition="Exists('..\..\build\native\Release\IgcsBridge.dll')">
+      <Link>IgcsBridge.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+</Project>

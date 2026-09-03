@@ -1,0 +1,200 @@
+using System;
+using System.Numerics;
+using CameraToolsXIV.Camera;
+using CameraToolsXIV.Igcs;
+using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility.Raii;
+using Dalamud.Interface.Windowing;
+
+namespace CameraToolsXIV.Ui;
+
+internal sealed class MainWindow : Window
+{
+    private static readonly Vector4 Good = new(0.35f, 0.85f, 0.45f, 1f);
+    private static readonly Vector4 Bad = new(0.90f, 0.40f, 0.40f, 1f);
+    private static readonly Vector4 Muted = new(0.65f, 0.65f, 0.65f, 1f);
+
+    private readonly Configuration configuration;
+    private readonly CameraController camera;
+    private readonly ScreenshotSession session;
+    private readonly IgcsBridge bridge;
+    private readonly ConnectorLink connector;
+    private readonly Func<bool> isCameraAllowed;
+    private readonly Action saveConfiguration;
+
+    public MainWindow(
+        Configuration configuration,
+        CameraController camera,
+        ScreenshotSession session,
+        IgcsBridge bridge,
+        ConnectorLink connector,
+        Func<bool> isCameraAllowed,
+        Action saveConfiguration)
+        : base("Camera Tools###CameraToolsXIVMain")
+    {
+        this.configuration = configuration;
+        this.camera = camera;
+        this.session = session;
+        this.bridge = bridge;
+        this.connector = connector;
+        this.isCameraAllowed = isCameraAllowed;
+        this.saveConfiguration = saveConfiguration;
+
+        this.SizeConstraints = new WindowSizeConstraints
+        {
+            MinimumSize = new Vector2(380, 320),
+            MaximumSize = new Vector2(float.MaxValue, float.MaxValue),
+        };
+    }
+
+    public override void Draw()
+    {
+        this.DrawStatus();
+        ImGui.Separator();
+        this.DrawCameraControls();
+        ImGui.Separator();
+        this.DrawLiveValues();
+        ImGui.Separator();
+        this.DrawSettings();
+    }
+
+    private void DrawStatus()
+    {
+        ImGui.TextUnformatted("ReShade link");
+        ImGui.Indent();
+
+        if (this.bridge.Loaded)
+        {
+            ImGui.TextColored(Good, "IGCS exports active");
+        }
+        else
+        {
+            ImGui.TextColored(Bad, "IGCS exports unavailable");
+            if (this.bridge.LoadError is { } error)
+            {
+                ImGui.TextWrapped(error);
+            }
+        }
+
+        if (this.connector.Connected)
+        {
+            ImGui.TextColored(Good, $"Connected to {this.connector.ConnectedModule}");
+        }
+        else
+        {
+            ImGui.TextColored(Muted, "No ReShade add-on connected");
+            ImGui.TextWrapped(
+                "Install ReShade 6.4+ with add-on support plus iMMERSE Parallax DoF or " +
+                "Otis_Inf's IgcsConnector, then reload this plugin.");
+        }
+
+        if (this.session.Active)
+        {
+            ImGui.TextColored(Good, "Add-on session in progress");
+        }
+
+        ImGui.Unindent();
+    }
+
+    private void DrawCameraControls()
+    {
+        var allowed = this.camera.LastSnapshot.Valid;
+        var enabled = this.camera.Enabled;
+
+        if (!allowed)
+        {
+            ImGui.TextColored(Muted, "Waiting for the game camera...");
+            return;
+        }
+
+        if (this.session.Active)
+        {
+            // The add-on owns the camera mid-stack; letting the user disable it here
+            // would strand the session partway through.
+            ImGui.TextColored(Muted, "Camera locked by the active add-on session.");
+            return;
+        }
+
+        // Enabling outside the permitted game state would be undone on the next frame,
+        // so refuse it here rather than let the checkbox flick back on its own.
+        var permitted = this.isCameraAllowed();
+        using (ImRaii.Disabled(!permitted && !enabled))
+        {
+            if (ImGui.Checkbox("Free camera", ref enabled))
+            {
+                if (enabled)
+                {
+                    this.camera.Enable();
+                }
+                else
+                {
+                    this.camera.Disable();
+                }
+            }
+        }
+
+        if (!permitted)
+        {
+            ImGui.TextColored(
+                Muted,
+                "Available in Group Pose. Enable \"Allow outside Group Pose\" below to use it anywhere.");
+        }
+
+        var fovDegrees = float.RadiansToDegrees(this.camera.FovRadians);
+        if (ImGui.SliderFloat("FoV", ref fovDegrees, 1f, 150f, "%.1f deg"))
+        {
+            this.camera.FovOverrideRadians = float.DegreesToRadians(fovDegrees);
+        }
+
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Reset##fov"))
+        {
+            this.camera.FovOverrideRadians = null;
+        }
+    }
+
+    private void DrawLiveValues()
+    {
+        var snapshot = this.camera.LastSnapshot;
+        if (!snapshot.Valid)
+        {
+            return;
+        }
+
+        var (pitch, yaw, roll) = snapshot.Basis.ToEuler();
+
+        // These are the exact values published to the add-on. When calibrating against
+        // IgcsSourceTester.fx, this panel and the shader overlay should agree.
+        ImGui.TextUnformatted("Published to ReShade");
+        ImGui.Indent();
+        ImGui.TextUnformatted($"pos    {snapshot.Position.X,9:F3} {snapshot.Position.Y,9:F3} {snapshot.Position.Z,9:F3}");
+        ImGui.TextUnformatted($"fov    {float.RadiansToDegrees(snapshot.FovRadians),9:F3} deg");
+        ImGui.TextUnformatted($"right  {snapshot.Basis.Right.X,9:F3} {snapshot.Basis.Right.Y,9:F3} {snapshot.Basis.Right.Z,9:F3}");
+        ImGui.TextUnformatted($"up     {snapshot.Basis.Up.X,9:F3} {snapshot.Basis.Up.Y,9:F3} {snapshot.Basis.Up.Z,9:F3}");
+        ImGui.TextUnformatted($"fwd    {snapshot.Basis.Forward.X,9:F3} {snapshot.Basis.Forward.Y,9:F3} {snapshot.Basis.Forward.Z,9:F3}");
+        ImGui.TextUnformatted($"p/y/r  {pitch,9:F3} {yaw,9:F3} {roll,9:F3} rad");
+        ImGui.Unindent();
+    }
+
+    private void DrawSettings()
+    {
+        if (!ImGui.CollapsingHeader("Settings"))
+        {
+            return;
+        }
+
+        var allowOutside = this.configuration.AllowOutsideGpose;
+        if (ImGui.Checkbox("Allow outside Group Pose", ref allowOutside))
+        {
+            this.configuration.AllowOutsideGpose = allowOutside;
+            this.saveConfiguration();
+        }
+
+        if (allowOutside)
+        {
+            ImGui.TextColored(
+                Bad,
+                "An untethered camera during normal play sees through walls and terrain.");
+        }
+    }
+}

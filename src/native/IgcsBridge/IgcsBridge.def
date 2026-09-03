@@ -1,0 +1,11 @@
+; Exported undecorated so that a ReShade add-on's GetProcAddress lookup finds them.
+; The IGCS_* names are fixed by the IGCS camera tool interface and must match exactly.
+LIBRARY IgcsBridge
+EXPORTS
+    IGCS_StartScreenshotSession
+    IGCS_MoveCameraPanorama
+    IGCS_MoveCameraMultishot
+    IGCS_EndScreenshotSession
+    IGCSBRIDGE_Register
+    IGCSBRIDGE_Unregister
+    IGCSBRIDGE_GetVersion
