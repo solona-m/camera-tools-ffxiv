@@ -98,10 +98,7 @@ internal sealed class MainWindow : Window
 
     private void DrawCameraControls()
     {
-        var allowed = this.camera.LastSnapshot.Valid;
-        var enabled = this.camera.Enabled;
-
-        if (!allowed)
+        if (!this.camera.LastSnapshot.Valid)
         {
             ImGui.TextColored(Muted, "Waiting for the game camera...");
             return;
@@ -109,26 +106,28 @@ internal sealed class MainWindow : Window
 
         if (this.session.Active)
         {
-            // The add-on owns the camera mid-stack; letting the user disable it here
-            // would strand the session partway through.
-            ImGui.TextColored(Muted, "Camera locked by the active add-on session.");
+            // Disarming mid-stack would abandon the session partway through and leave the
+            // add-on waiting on a camera that stopped responding.
+            ImGui.TextColored(Good, "Camera held by the add-on for this stack.");
             return;
         }
 
-        // Enabling outside the permitted game state would be undone on the next frame,
-        // so refuse it here rather than let the checkbox flick back on its own.
+        // Arming outside the permitted game state would be undone on the next frame, so
+        // refuse it here rather than let the checkbox flick back on its own.
+        var armed = this.camera.Armed;
         var permitted = this.isCameraAllowed();
-        using (ImRaii.Disabled(!permitted && !enabled))
+
+        using (ImRaii.Disabled(!permitted && !armed))
         {
-            if (ImGui.Checkbox("Free camera", ref enabled))
+            if (ImGui.Checkbox("Available to ReShade add-ons", ref armed))
             {
-                if (enabled)
+                if (armed)
                 {
-                    this.camera.Enable();
+                    this.camera.Arm();
                 }
                 else
                 {
-                    this.camera.Disable();
+                    this.camera.Disarm();
                 }
             }
         }
@@ -140,17 +139,10 @@ internal sealed class MainWindow : Window
                 "Available in Group Pose. Enable \"Allow outside Group Pose\" below to use it anywhere.");
         }
 
-        var fovDegrees = float.RadiansToDegrees(this.camera.FovRadians);
-        if (ImGui.SliderFloat("FoV", ref fovDegrees, 1f, 150f, "%.1f deg"))
-        {
-            this.camera.FovOverrideRadians = float.DegreesToRadians(fovDegrees);
-        }
-
-        ImGui.SameLine();
-        if (ImGui.SmallButton("Reset##fov"))
-        {
-            this.camera.FovOverrideRadians = null;
-        }
+        ImGui.TextWrapped(
+            "Frame the shot however you like -- Group Pose, Cammy, Brio. The camera is " +
+            "only taken over while an add-on is stacking frames, and handed straight back " +
+            "afterwards.");
     }
 
     private void DrawLiveValues()

@@ -63,6 +63,19 @@ framework tick has no ordering guarantee against that update. Writing on the way
 the vtable call is the only placement that reliably wins. See
 [`CameraController`](src/CameraToolsXIV/Camera/CameraController.cs).
 
+**The override lasts only as long as a stack.** Depth of field needs to own the camera
+for the seconds it spends stepping around an aperture, and no longer. So arming the
+camera changes nothing on its own — it just sets the `cameraEnabled` flag the add-on
+reads — and the transform is taken over between `IGCS_StartScreenshotSession` and
+`IGCS_EndScreenshotSession`, then handed straight back. You frame the shot with whatever
+you already use (Group Pose, [Cammy](https://github.com/UnknownX7/Cammy),
+[Brio](https://github.com/Etheirys/Brio)) and this stays out of the way.
+
+Orientation is frozen alongside position for the duration of a stack. That matters: an
+accumulation stack has to be a set of *parallel* translations. If the camera kept looking
+at a fixed world point while stepping sideways it would toe in, and the shader's
+focus-delta realignment assumes it did not.
+
 ## Building
 
 Requires the .NET 10 SDK, Visual Studio Build Tools with the C++ workload, and a Dalamud
@@ -83,10 +96,16 @@ plausible-looking garbage rather than a crash, so they are worth catching on the
 ## Status
 
 Working: the IGCS export surface, add-on discovery and per-frame data publishing, the
-free-camera override, and the screenshot-session semantics that depth of field drives.
+session-scoped camera override, and the screenshot-session semantics that depth of field
+drives.
 
-Not yet built: keyboard/gamepad fly controls, camera roll, camera paths with
-interpolated playback, presets, and rebindable hotkeys.
+Untested in-game: the ABI is verified by the harness, but the camera hook and the
+published coordinate values have not yet been checked against a running client.
+
+Deliberately not built: fly controls. Parallax DoF needs us to *own* the camera position,
+not to move it for you, and Cammy and Brio already do camera movement well. Still open,
+if they turn out to be wanted: camera paths with interpolated playback, presets, and
+rebindable hotkeys.
 
 ### Calibration
 

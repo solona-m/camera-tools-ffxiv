@@ -12,16 +12,21 @@ namespace CameraToolsXIV.Igcs;
 /// <remarks>
 /// <para>
 /// Parallax DoF and IGCS DoF both follow the same sequence: start a multishot session,
-/// step the camera around a small aperture shape with
-/// <see cref="MoveMultishot"/>, wait a few frames for the game to catch up, capture, and
-/// finally end the session. Every step is expressed <b>relative to the session's start
-/// position</b>, which is why the origin is snapshotted here rather than accumulated.
+/// step the camera around a small aperture shape with <see cref="MoveMultishot"/>, wait a
+/// few frames for the game to catch up, capture, and finally end the session. Every step
+/// is expressed <b>relative to the session's start position</b>, which is why the origin
+/// is frozen at the start rather than accumulated.
+/// </para>
+/// <para>
+/// The session is also the only thing that takes the camera over. Outside one the user
+/// keeps whatever they framed the shot with, so this plugin does not compete with GPose's
+/// own controls or with Cammy and Brio.
 /// </para>
 /// <para>
 /// All of these methods run on ReShade's render thread, not the game thread. They only
-/// ever record intent on <see cref="CameraController"/>, whose own lock hands the values
-/// to the camera update hook. Writing the game's camera struct directly from here would
-/// race with the game's update.
+/// record intent on <see cref="CameraController"/>, whose lock hands the values to the
+/// camera update hook. Writing the game's camera struct directly from here would race
+/// with the game's own update.
 /// </para>
 /// </remarks>
 internal sealed class ScreenshotSession
@@ -30,18 +35,13 @@ internal sealed class ScreenshotSession
     private const int AllOk = 0;
     private const int ErrorCameraNotEnabled = 1;
     private const int ErrorAlreadySessionActive = 3;
-
-    // ScreenshotType.
-    private const byte TypeHorizontalPanorama = 0;
-    private const byte TypeMultiShot = 1;
+    private const int ErrorUnknownError = 5;
 
     private readonly CameraController camera;
     private readonly IPluginLog log;
     private readonly object gate = new();
 
     private bool active;
-    private ViewBasis originBasis;
-    private float? originalFovOverride;
 
     public ScreenshotSession(CameraController camera, IPluginLog log)
     {
@@ -63,19 +63,18 @@ internal sealed class ScreenshotSession
                 return ErrorAlreadySessionActive;
             }
 
-            if (!this.camera.Enabled)
+            if (!this.camera.Armed)
             {
                 // The add-on surfaces this to the user as "enable the camera first",
                 // which is exactly right: we have nothing to offset from otherwise.
                 return ErrorCameraNotEnabled;
             }
 
-            // Freeze the basis for the whole session. Steps are resolved against the
-            // orientation at the moment the session began, so that a stack stays
-            // rectilinear even if something else nudges the camera mid-session.
-            this.originBasis = this.camera.Basis;
-            this.originalFovOverride = this.camera.FovOverrideRadians;
-            this.camera.SessionOffset = Vector3.Zero;
+            if (!this.camera.BeginHold())
+            {
+                return ErrorUnknownError;
+            }
+
             this.active = true;
         }
 
@@ -103,7 +102,10 @@ internal sealed class ScreenshotSession
                 return;
             }
 
-            var offset = (this.originBasis.Right * stepLeftRight) + (this.originBasis.Up * stepUpDown);
+            // Resolved against the basis frozen at the start of the hold, so a long stack
+            // stays rectilinear even if something else nudges the camera mid-session.
+            var basis = this.camera.HoldBasis;
+            var offset = (basis.Right * stepLeftRight) + (basis.Up * stepUpDown);
 
             this.camera.SessionOffset = fromStartPosition
                 ? offset
@@ -127,15 +129,15 @@ internal sealed class ScreenshotSession
                 return;
             }
 
-            // Panoramas rotate about the world up axis so the horizon stays level,
-            // rather than about the camera's own up, which would tilt on a pitched shot.
+            // Panoramas rotate about the world up axis so the horizon stays level, rather
+            // than about the camera's own up, which would tilt on a pitched shot.
             var rotation = Matrix4x4.CreateFromAxisAngle(Vector3.UnitY, stepAngle);
-            var basis = this.camera.Basis;
+            var basis = this.camera.HoldBasis;
 
-            this.camera.SetBasis(new ViewBasis(
+            this.camera.HoldBasis = new ViewBasis(
                 Vector3.Normalize(Vector3.Transform(basis.Right, rotation)),
                 Vector3.Normalize(Vector3.Transform(basis.Up, rotation)),
-                Vector3.Normalize(Vector3.Transform(basis.Forward, rotation))));
+                Vector3.Normalize(Vector3.Transform(basis.Forward, rotation)));
         }
     }
 
@@ -148,12 +150,34 @@ internal sealed class ScreenshotSession
                 return;
             }
 
-            this.camera.SessionOffset = Vector3.Zero;
-            this.camera.FovOverrideRadians = this.originalFovOverride;
-            this.camera.SetBasis(this.originBasis);
+            this.camera.ReleaseHold();
             this.active = false;
         }
 
         this.log.Information("IGCS session ended.");
+    }
+
+    /// <summary>
+    /// Abandons a session without waiting for the add-on to end it.
+    /// </summary>
+    /// <remarks>
+    /// Used on unload and when the camera stops being permitted. An add-on that crashes
+    /// or is disabled mid-stack never sends <c>IGCS_EndScreenshotSession</c>, and without
+    /// this the camera would stay frozen with no visible way to release it.
+    /// </remarks>
+    public void Abort()
+    {
+        lock (this.gate)
+        {
+            if (!this.active)
+            {
+                return;
+            }
+
+            this.camera.ReleaseHold();
+            this.active = false;
+        }
+
+        this.log.Warning("IGCS session aborted.");
     }
 }

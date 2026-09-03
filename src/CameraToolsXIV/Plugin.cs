@@ -68,11 +68,12 @@ public sealed class Plugin : IDalamudPlugin
         this.camera.EnsureHooked();
         this.connector.TryConnect();
 
-        // Drop the override the moment we are no longer allowed to hold it, so that
-        // leaving Group Pose can never strand the player with a detached camera.
-        if (this.camera.Enabled && !this.IsCameraAllowed())
+        // Drop everything the moment we are no longer allowed to hold the camera, so that
+        // leaving Group Pose mid-stack can never strand the player with a frozen camera.
+        if (this.camera.Armed && !this.IsCameraAllowed())
         {
-            this.camera.Disable();
+            this.session.Abort();
+            this.camera.Disarm();
         }
 
         this.PublishCameraData();
@@ -104,7 +105,7 @@ public sealed class Plugin : IDalamudPlugin
 
         var data = new CameraToolsData
         {
-            CameraEnabled = (byte)(this.camera.Enabled ? 1 : 0),
+            CameraEnabled = (byte)(this.camera.Armed ? 1 : 0),
             CameraMovementLocked = (byte)(this.session.Active ? 1 : 0),
             // The interface specifies degrees here while the game stores radians.
             Fov = float.RadiansToDegrees(snapshot.FovRadians),
@@ -143,10 +144,12 @@ public sealed class Plugin : IDalamudPlugin
         this.windowSystem.RemoveAllWindows();
 
         // Order matters on unload: stop the add-on being able to call us, tell it the
-        // camera is gone, then release the camera itself.
+        // camera is gone, then release the camera itself. Aborting after the bridge is
+        // disposed means no in-flight session call can re-acquire the hold behind us.
         this.bridge.Dispose();
         this.connector.PublishDisabled();
-        this.camera.Disable();
+        this.session.Abort();
+        this.camera.Disarm();
         this.camera.Dispose();
     }
 }
