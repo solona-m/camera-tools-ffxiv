@@ -108,6 +108,23 @@ internal sealed unsafe class CameraController : IDisposable
     // un-stamped snapshot stale, which is the safe direction.
     private long lastUpdateMs;
 
+    // When the update detour last ran, as distinct from when the snapshot was last
+    // refreshed -- the tick refreshes it too, so one timestamp cannot answer both.
+    private long lastDetourMs;
+
+    /// <summary>
+    /// How long the detour may be silent before the framework tick takes over applying a
+    /// hold.
+    /// </summary>
+    /// <remarks>
+    /// Comfortably longer than a frame at any playable rate, so at speed this never fires
+    /// and the tick keeps its hands off a camera the game is actively updating. It exists
+    /// for the case where the game's update stops but rendering does not -- a paused world
+    /// being the obvious one. Nothing rebuilds the matrix then, so a tick write is not
+    /// overwritten and is the only thing that can still move the camera.
+    /// </remarks>
+    private const long DetourQuietForMs = 100;
+
     /// <summary>
     /// How long a snapshot stays usable without the camera update refreshing it.
     /// </summary>
@@ -187,6 +204,19 @@ internal sealed unsafe class CameraController : IDisposable
     public bool Holding
     {
         get { lock (this.gate) { return this.holding; } }
+    }
+
+    /// <summary>
+    /// Whether the game is still calling the camera update this detour sits on.
+    /// </summary>
+    /// <remarks>
+    /// Worth surfacing rather than inferring. A camera that has stopped moving looks the
+    /// same whether the game stopped updating it or the plugin stopped writing to it, and
+    /// those want opposite fixes.
+    /// </remarks>
+    public bool UpdateFiring
+    {
+        get { lock (this.gate) { return Environment.TickCount64 - this.lastDetourMs <= DetourQuietForMs; } }
     }
 
     /// <summary>
@@ -416,6 +446,11 @@ internal sealed unsafe class CameraController : IDisposable
     {
         this.updateHook!.Original(camera);
 
+        lock (this.gate)
+        {
+            this.lastDetourMs = Environment.TickCount64;
+        }
+
         try
         {
             this.RefreshAndApply(camera);
@@ -452,9 +487,19 @@ internal sealed unsafe class CameraController : IDisposable
             return;
         }
 
+        // Normally read-only: the game's own update runs later in the frame and would
+        // overwrite anything written here, so applying a hold from the tick would be at
+        // best pointless and at worst a frame of flicker. When the detour has gone quiet
+        // there is no such update to lose to, and the tick becomes the only writer left.
+        bool applyHold;
+        lock (this.gate)
+        {
+            applyHold = Environment.TickCount64 - this.lastDetourMs > DetourQuietForMs;
+        }
+
         try
         {
-            this.RefreshAndApply(camera, applyHold: false);
+            this.RefreshAndApply(camera, applyHold);
         }
         catch (Exception ex)
         {
@@ -515,6 +560,26 @@ internal sealed unsafe class CameraController : IDisposable
                     // the engine's axis conventions turn out to be.
                     scene->Position = this.holdPosition + this.sessionOffset;
                     scene->LookAtVector = this.holdLookAt + this.sessionOffset;
+
+                    // Then write the matrices those two feed, rather than leaving the game
+                    // to rebuild them.
+                    //
+                    // Position and LookAtVector are inputs. We write them on the way out of
+                    // an update that has already built this frame's matrices from the old
+                    // values, so they only take effect when the game runs the update again.
+                    // That is fine at speed and useless when the world is paused: the
+                    // rebuild never comes, the renderer keeps drawing the matrix it has, and
+                    // the camera sits still through an entire stack while we cheerfully
+                    // publish the position it was supposed to have moved to.
+                    //
+                    // Writing the matrix removes the dependency and the frame of lag with
+                    // it. Both copies go together: the render camera is what the renderer
+                    // consumes, and the scene camera's is what ScreenPointToRay and
+                    // WorldToScreen read, so letting them disagree would put every
+                    // world-to-screen answer in the game a frame behind the picture.
+                    var view = this.holdBasis.ToViewMatrix(this.holdEye + this.sessionOffset);
+                    render->ViewMatrix = view;
+                    scene->ViewMatrix = view;
 
                     if (this.fovOverrideRadians is { } writeFov)
                     {

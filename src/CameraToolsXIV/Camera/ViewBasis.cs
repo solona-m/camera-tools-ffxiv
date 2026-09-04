@@ -60,6 +60,25 @@ internal readonly struct ViewBasis
     public Vector3 PositionFromViewMatrix(in Matrix4x4 view)
         => -((Right * view.M41) + (Up * view.M42) + (Forward * view.M43));
 
+    /// <summary>
+    /// Builds the view matrix for this basis with the camera at <paramref name="eye"/>.
+    /// </summary>
+    /// <remarks>
+    /// The exact inverse of <see cref="FromViewMatrix"/> and
+    /// <see cref="PositionFromViewMatrix"/>, and written to stay that way: the basis goes
+    /// back in as columns, and the translation row is the eye projected onto the basis and
+    /// negated. Round-tripping a matrix through those two and this one returns it unchanged,
+    /// which is the property worth preserving -- the decomposition is the part that has been
+    /// checked against the game, so the composition has to agree with it rather than with
+    /// any textbook convention.
+    /// </remarks>
+    public Matrix4x4 ToViewMatrix(Vector3 eye)
+        => new(
+            Right.X, Up.X, Forward.X, 0f,
+            Right.Y, Up.Y, Forward.Y, 0f,
+            Right.Z, Up.Z, Forward.Z, 0f,
+            -Vector3.Dot(eye, Right), -Vector3.Dot(eye, Up), -Vector3.Dot(eye, Forward), 1f);
+
     /// <summary>Orientation as a quaternion, in (x, y, z, w) order.</summary>
     public Vector4 ToQuaternion()
     {
