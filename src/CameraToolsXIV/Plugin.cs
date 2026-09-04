@@ -72,7 +72,7 @@ public sealed class Plugin : IDalamudPlugin
         this.configuration = this.pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
         this.camera = new CameraController(this.interop, this.log);
-        this.session = new ScreenshotSession(this.camera, this.log);
+        this.session = new ScreenshotSession(this.camera, this.configuration, this.log);
         this.bridge = new IgcsBridge(this.log);
         this.connector = new ConnectorLink(this.log);
 
@@ -87,6 +87,12 @@ public sealed class Plugin : IDalamudPlugin
 
         this.windowSystem = new WindowSystem("CameraToolsXIV");
         this.windowSystem.AddWindow(this.window);
+
+        // Dalamud hides plugin windows during Group Pose and cutscenes by default, which
+        // is exactly where this tool is used -- without these the window is invisible
+        // precisely when it is needed.
+        this.pluginInterface.UiBuilder.DisableGposeUiHide = true;
+        this.pluginInterface.UiBuilder.DisableCutsceneUiHide = true;
 
         this.pluginInterface.UiBuilder.Draw += this.DrawUi;
         this.pluginInterface.UiBuilder.OpenMainUi += this.OpenMainUi;

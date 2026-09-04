@@ -38,20 +38,36 @@ internal sealed class ScreenshotSession
     private const int ErrorUnknownError = 5;
 
     private readonly CameraController camera;
+    private readonly Configuration configuration;
     private readonly IPluginLog log;
     private readonly object gate = new();
 
     private bool active;
+    private Vector2 lastRawStep;
+    private Vector3 lastOffset;
 
-    public ScreenshotSession(CameraController camera, IPluginLog log)
+    public ScreenshotSession(CameraController camera, Configuration configuration, IPluginLog log)
     {
         this.camera = camera;
+        this.configuration = configuration;
         this.log = log;
     }
 
     public bool Active
     {
         get { lock (this.gate) { return this.active; } }
+    }
+
+    /// <summary>The most recent step as the add-on sent it, before scaling.</summary>
+    public Vector2 LastRawStep
+    {
+        get { lock (this.gate) { return this.lastRawStep; } }
+    }
+
+    /// <summary>The world-space offset that step became, for calibrating the scale.</summary>
+    public Vector3 LastOffset
+    {
+        get { lock (this.gate) { return this.lastOffset; } }
     }
 
     public int Start(byte type)
@@ -104,8 +120,15 @@ internal sealed class ScreenshotSession
 
             // Resolved against the basis frozen at the start of the hold, so a long stack
             // stays rectilinear even if something else nudges the camera mid-session.
+            //
+            // Scaled into world units: the add-on's steps are in camera-tool units, and
+            // converting them is the camera tool's job, not the add-on's.
+            var scale = this.configuration.StepScale;
             var basis = this.camera.HoldBasis;
-            var offset = (basis.Right * stepLeftRight) + (basis.Up * stepUpDown);
+            var offset = (basis.Right * stepLeftRight * scale) + (basis.Up * stepUpDown * scale);
+
+            this.lastRawStep = new Vector2(stepLeftRight, stepUpDown);
+            this.lastOffset = offset;
 
             this.camera.SessionOffset = fromStartPosition
                 ? offset

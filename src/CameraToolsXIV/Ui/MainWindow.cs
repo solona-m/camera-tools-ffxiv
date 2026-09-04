@@ -106,6 +106,13 @@ internal sealed class MainWindow : Window
         if (this.session.Active)
         {
             ImGui.TextColored(Good, "Camera held by the add-on for this stack.");
+
+            // Shown live during a stack: this is what to watch when calibrating the step
+            // scale, since the add-on's raw values mean nothing until they are converted.
+            var raw = this.session.LastRawStep;
+            var offset = this.session.LastOffset;
+            ImGui.TextUnformatted($"step   {raw.X,9:F3} {raw.Y,9:F3}  (add-on units)");
+            ImGui.TextUnformatted($"moved  {offset.Length(),9:F3}  world units");
             return;
         }
 
@@ -154,10 +161,29 @@ internal sealed class MainWindow : Window
 
     private void DrawSettings()
     {
-        if (!ImGui.CollapsingHeader("Settings"))
+        // Open by default: the step scale needs calibrating per setup, so hiding it
+        // behind a closed header would be hiding the first thing anyone has to touch.
+        if (!ImGui.CollapsingHeader("Settings", ImGuiTreeNodeFlags.DefaultOpen))
         {
             return;
         }
+
+        var stepScale = this.configuration.StepScale;
+        if (ImGui.SliderFloat("Step scale", ref stepScale, 0.001f, 0.5f, "%.3f"))
+        {
+            this.configuration.StepScale = stepScale;
+            this.saveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Converts the add-on's step values into FFXIV world units.\n" +
+                "Lower this if the camera lurches during a stack; raise it if the\n" +
+                "depth-of-field effect is too subtle to see.");
+        }
+
+        ImGui.Separator();
 
         var allowOutside = this.configuration.AllowOutsideGpose;
         if (ImGui.Checkbox("Allow outside Group Pose", ref allowOutside))
