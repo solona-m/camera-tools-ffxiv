@@ -76,10 +76,31 @@ accumulation stack has to be a set of *parallel* translations. If the camera kep
 at a fixed world point while stepping sideways it would toe in, and the shader's
 focus-delta realignment assumes it did not.
 
+## Installing
+
+Add this to Dalamud's custom plugin repositories (`/xlsettings` → Experimental):
+
+```
+https://dl.solona.info/repo.json
+```
+
+Camera Tools is **testing-exclusive** until its first stable release, so enable "Get
+plugin testing builds" in the same settings page or it will not appear in the list.
+
+You also need [ReShade](https://reshade.me) 6.4 or newer **with add-on support**, plus a
+depth-of-field add-on that speaks IGCS — iMMERSE Parallax DoF, or Otis_Inf's
+[IgcsConnector](https://github.com/FransBouma/IgcsConnector). The plugin does nothing on
+its own; it exists so those can drive the camera.
+
+Type `/camtools` to check the connection. Two green lines mean it worked: the IGCS
+exports are live, and an add-on has found them.
+
 ## Building
 
 Requires the .NET 10 SDK, Visual Studio Build Tools with the C++ workload, and a Dalamud
-dev install at `%AppData%\XIVLauncher\addon\Hooks\dev`.
+dev install at `%AppData%\XIVLauncher\addon\Hooks\dev`. The MSVC toolset is detected
+rather than pinned, so any recent Visual Studio works — pass `-PlatformToolset` to
+override.
 
 ```powershell
 ./build/build.ps1 -Deploy
@@ -99,8 +120,12 @@ Working: the IGCS export surface, add-on discovery and per-frame data publishing
 session-scoped camera override, and the screenshot-session semantics that depth of field
 drives.
 
-Untested in-game: the ABI is verified by the harness, but the camera hook and the
-published coordinate values have not yet been checked against a running client.
+Confirmed in-game: Parallax DoF discovers the exports by module scan, connects, and drives
+the camera through a session. The published basis checks out as orthonormal and
+left-handed consistent (`right × up` equals `fwd` exactly).
+
+Still unverified: a *completed* stack. Everything tested so far has been the setup
+preview, not a full 1024-sample render.
 
 Deliberately not built: fly controls. Parallax DoF needs us to *own* the camera position,
 not to move it for you, and Cammy and Brio already do camera movement well. Still open,
@@ -120,9 +145,12 @@ should track as you move the camera.
   actors, but water, foliage, weather and particles keep animating and will ghost across
   a stack. Inherent to an MMO; manageable by shot selection, not fixable here.
 - Disable V-Sync for frame-step synchronisation, per Marty's own guidance.
-- The free camera is restricted to Group Pose by default. The setting to use it during
-  normal play is deliberately opt-in: an untethered camera in the overworld sees through
-  walls and terrain.
+- The camera is only offered to add-ons in Group Pose by default. The setting to allow it
+  during normal play is deliberately opt-in: a camera an add-on can reposition freely in
+  the overworld sees through walls and terrain.
+- Marty's rangefinder is logarithmic (`exp2(FOCUS_DELTA - 16)`), so values below about 10
+  are indistinguishable from zero and read as the control doing nothing. It also
+  multiplies with the blur radius, so neither can be zero.
 - Dalamud plugins are against FFXIV's Terms of Service. This is client-side visual
   tooling in the same category as Brio and Ktisis.
 
