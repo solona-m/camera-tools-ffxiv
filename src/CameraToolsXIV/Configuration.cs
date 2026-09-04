@@ -17,36 +17,11 @@ public sealed class Configuration : IPluginConfiguration
     /// </remarks>
     public bool AllowOutsideGpose { get; set; }
 
-    /// <summary>
-    /// Converts an add-on's step values into FFXIV world units.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// Should normally stay at 1. The add-on reprojects each frame assuming the camera
-    /// moved exactly as far as it asked, so scaling here puts the camera somewhere the
-    /// shader does not think it is. Its focus control is a ratio and can absorb a constant
-    /// factor, but only within its own range: at a scale of 0.06 the focus delta needed is
-    /// some fifteen times what the slider offers, and the subject can never be brought
-    /// into focus.
-    /// </para>
-    /// <para>
-    /// Use the add-on's own blur radius to control how far the camera travels. That is the
-    /// aperture size, and unlike this it is a value the shader knows about.
-    /// </para>
-    /// </remarks>
-    public float StepScale { get; set; } = 1.0f;
-
-    /// <summary>
-    /// Mirrors the direction of add-on steps.
-    /// </summary>
-    /// <remarks>
-    /// An escape hatch, not an expected setting. If the step direction were mirrored the
-    /// parallax would invert, and the add-on would focus on the background when asked to
-    /// focus on the foreground. The basis we publish checks out as left-handed and
-    /// self-consistent, so this should not be needed -- but it is the one assumption that
-    /// cannot be verified without running a stack, and flipping it is a decisive test.
-    /// </remarks>
-    public bool InvertStepDirection { get; set; }
+    // A step scale and a horizontal mirror used to live here. Both are gone: steps are
+    // taken at face value now, because the shader reprojects assuming the camera moved
+    // exactly as far as it asked, and the aperture size belongs to the add-on's blur
+    // radius. Old configs keep the stale keys on disk harmlessly -- unknown properties are
+    // ignored on load -- so there is nothing to migrate.
 
     /// <summary>
     /// Publishes horizontal field of view rather than the vertical one the game stores.
@@ -59,4 +34,39 @@ public sealed class Configuration : IPluginConfiguration
     /// switchable in case another add-on reads it the other way.
     /// </remarks>
     public bool PublishHorizontalFov { get; set; } = true;
+
+    /// <summary>
+    /// Stops hair, cloth and other bone physics for the duration of a stack.
+    /// </summary>
+    /// <remarks>
+    /// On by default, and the reason is the same one that makes the camera override
+    /// session-scoped: an accumulation stack needs every frame in it to match, and a skirt
+    /// swinging through one ghosts harder than anything else in shot. Group Pose does not
+    /// freeze this on its own.
+    /// <para>
+    /// The freeze lands wherever the simulation happens to be when the stack begins, which
+    /// is right for the stack and arbitrary as a pose. If a particular drape matters, hold
+    /// still until it settles before starting the stack.
+    /// </para>
+    /// </remarks>
+    public bool FreezePhysicsDuringSession { get; set; } = true;
+
+    /// <summary>
+    /// Stops the game's logic clock for the duration of a stack, holding the environment
+    /// still along with the actors.
+    /// </summary>
+    /// <remarks>
+    /// On by default. Freezing physics leaves water, foliage, weather and particles moving,
+    /// and every one of those ghosts across a stack that takes four minutes to render. The
+    /// only lever that reaches them is the frame delta itself, so this is a blunt
+    /// instrument: it stops chat, movement, and everything else the game ticks, for as long
+    /// as the stack runs.
+    /// <para>
+    /// That is a real cost, and it is the default anyway. A stack is a deliberate act that
+    /// occupies the game for minutes whatever happens; a still world is the whole point of
+    /// running one, and discovering afterwards that the foliage moved is worse than knowing
+    /// in advance that chat will not arrive until it finishes.
+    /// </para>
+    /// </remarks>
+    public bool PauseWorldDuringSession { get; set; } = true;
 }

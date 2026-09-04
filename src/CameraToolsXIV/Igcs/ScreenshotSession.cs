@@ -38,19 +38,26 @@ internal sealed class ScreenshotSession
     private const int ErrorUnknownError = 5;
 
     private readonly CameraController camera;
-    private readonly Configuration configuration;
     private readonly IPluginLog log;
     private readonly object gate = new();
 
     private bool active;
     private bool wasAborted;
+    private byte sessionType;
     private Vector2 lastRawStep;
     private Vector3 lastOffset;
 
-    public ScreenshotSession(CameraController camera, Configuration configuration, IPluginLog log)
+    // Panorama used to record nothing, which made a sweeping camera indistinguishable from
+    // a still one on the panel: multishot showed its step, panorama showed the zeros it had
+    // never overwritten. Anything that can move the camera has to be measurable, or the
+    // readout quietly lies about which call is driving it.
+    private float lastPanoramaAngle;
+    private float totalPanoramaAngle;
+    private int panoramaCalls;
+
+    public ScreenshotSession(CameraController camera, IPluginLog log)
     {
         this.camera = camera;
-        this.configuration = configuration;
         this.log = log;
     }
 
@@ -84,6 +91,29 @@ internal sealed class ScreenshotSession
         get { lock (this.gate) { return this.lastOffset; } }
     }
 
+    /// <summary>The session type the add-on asked for: 0 panorama, 1 multishot.</summary>
+    /// <remarks>
+    /// Recorded because the plugin does not branch on it -- both session types take the
+    /// camera the same way, and the add-on then drives whichever move call it likes. That
+    /// makes the type the only evidence of what the add-on thinks it is doing.
+    /// </remarks>
+    public byte SessionType
+    {
+        get { lock (this.gate) { return this.sessionType; } }
+    }
+
+    /// <summary>The most recent panorama step as the add-on sent it.</summary>
+    public float LastPanoramaAngle
+    {
+        get { lock (this.gate) { return this.lastPanoramaAngle; } }
+    }
+
+    /// <summary>Every panorama step so far, summed, and how many there were.</summary>
+    public (float Total, int Calls) PanoramaTotal
+    {
+        get { lock (this.gate) { return (this.totalPanoramaAngle, this.panoramaCalls); } }
+    }
+
     public int Start(byte type)
     {
         lock (this.gate)
@@ -107,6 +137,15 @@ internal sealed class ScreenshotSession
 
             this.active = true;
             this.wasAborted = false;
+            this.sessionType = type;
+
+            // Cleared per session, so the panel describes this stack rather than the last
+            // one that happened to touch each field.
+            this.lastRawStep = Vector2.Zero;
+            this.lastOffset = Vector3.Zero;
+            this.lastPanoramaAngle = 0f;
+            this.totalPanoramaAngle = 0f;
+            this.panoramaCalls = 0;
         }
 
         this.log.Information($"IGCS session started (type {type}).");
@@ -136,19 +175,15 @@ internal sealed class ScreenshotSession
             // Resolved against the basis frozen at the start of the hold, so a long stack
             // stays rectilinear even if something else nudges the camera mid-session.
             //
-            // Scaled into world units: the add-on's steps are in camera-tool units, and
-            // converting them is the camera tool's job, not the add-on's.
-            var scale = this.configuration.StepScale;
-
-            // Inversion mirrors the horizontal axis only. Negating both axes would be a
-            // 180 degree rotation of the aperture, and the aperture is a symmetric sample
-            // pattern -- so it would map onto itself and change nothing about the rendered
-            // stack, while still appearing to do something during the asymmetric setup
-            // step. That would make it useless as the diagnostic it exists to be.
-            var horizontal = this.configuration.InvertStepDirection ? -scale : scale;
-
+            // Taken at face value, one add-on unit to one world unit. There was a scale
+            // factor here and a switch to mirror the horizontal axis; both are gone. The
+            // shader reprojects each frame assuming the camera moved exactly as far as it
+            // asked, so any factor but one puts the camera where the shader does not think
+            // it is, and the aperture size is the add-on's blur radius to set, not ours to
+            // rescale. The mirror was a diagnostic for a handedness question that the
+            // published basis has since answered.
             var basis = this.camera.HoldBasis;
-            var offset = (basis.Right * stepLeftRight * horizontal) + (basis.Up * stepUpDown * scale);
+            var offset = (basis.Right * stepLeftRight) + (basis.Up * stepUpDown);
 
             this.lastRawStep = new Vector2(stepLeftRight, stepUpDown);
             this.lastOffset = offset;
@@ -174,6 +209,10 @@ internal sealed class ScreenshotSession
             {
                 return;
             }
+
+            this.lastPanoramaAngle = stepAngle;
+            this.totalPanoramaAngle += stepAngle;
+            this.panoramaCalls++;
 
             this.camera.RotateHold(stepAngle);
         }

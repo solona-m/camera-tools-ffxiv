@@ -2,7 +2,9 @@ using System;
 using System.Numerics;
 using CameraToolsXIV.Camera;
 using CameraToolsXIV.Igcs;
+using CameraToolsXIV.World;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 
 namespace CameraToolsXIV.Ui;
@@ -18,6 +20,8 @@ internal sealed class MainWindow : Window
     private readonly ScreenshotSession session;
     private readonly IgcsBridge bridge;
     private readonly ConnectorLink connector;
+    private readonly PhysicsFreeze physicsFreeze;
+    private readonly WorldPause worldPause;
     private readonly Func<bool> isCameraAllowed;
     private readonly Action saveConfiguration;
 
@@ -27,6 +31,8 @@ internal sealed class MainWindow : Window
         ScreenshotSession session,
         IgcsBridge bridge,
         ConnectorLink connector,
+        PhysicsFreeze physicsFreeze,
+        WorldPause worldPause,
         Func<bool> isCameraAllowed,
         Action saveConfiguration)
         : base("Camera Tools###CameraToolsXIVMain")
@@ -36,6 +42,8 @@ internal sealed class MainWindow : Window
         this.session = session;
         this.bridge = bridge;
         this.connector = connector;
+        this.physicsFreeze = physicsFreeze;
+        this.worldPause = worldPause;
         this.isCameraAllowed = isCameraAllowed;
         this.saveConfiguration = saveConfiguration;
 
@@ -125,10 +133,46 @@ internal sealed class MainWindow : Window
 
             // Shown live during a stack: this is what to watch when calibrating the step
             // scale, since the add-on's raw values mean nothing until they are converted.
+            var type = this.session.SessionType;
+            ImGui.TextUnformatted(
+                $"type   {type,9}  ({(type == 0 ? "panorama" : type == 1 ? "multishot" : "unknown")})");
+
             var raw = this.session.LastRawStep;
             var offset = this.session.LastOffset;
             ImGui.TextUnformatted($"step   {raw.X,9:F3} {raw.Y,9:F3}  (add-on units)");
             ImGui.TextUnformatted($"moved  {offset.Length(),9:F3}  world units");
+
+            // Both move calls are shown, always. A camera that is visibly sweeping while
+            // every number reads zero means the add-on is driving the other call, and that
+            // is the single most useful thing this panel can tell you.
+            var (total, calls) = this.session.PanoramaTotal;
+            ImGui.TextUnformatted(
+                $"rotate {this.session.LastPanoramaAngle,9:F3} rad  " +
+                $"({float.RadiansToDegrees(this.session.LastPanoramaAngle):F1} deg)");
+            ImGui.TextUnformatted(
+                $"swept  {float.RadiansToDegrees(total),9:F1} deg over {calls} calls");
+
+            // Worth showing rather than assuming: both are derived a frame behind the
+            // session, and both are the kind of thing that is invisible until you compare
+            // two stacks and wonder why one ghosted.
+            if (this.physicsFreeze.Frozen)
+            {
+                ImGui.TextColored(Good, "Physics frozen");
+            }
+
+            if (this.worldPause.Paused)
+            {
+                ImGui.TextColored(Good, "World paused");
+            }
+
+            // The two ways a stack can silently go wrong look identical on screen, so name
+            // which one is happening: the game no longer updating the camera, or the plugin
+            // no longer writing to it.
+            ImGui.TextColored(
+                this.camera.UpdateFiring ? Muted : Bad,
+                this.camera.UpdateFiring
+                    ? "camera update firing"
+                    : "camera update stopped -- holding from the framework tick");
 
             // The only way out if an add-on dies mid-stack without ending its session.
             if (ImGui.SmallButton("Release camera"))
@@ -198,34 +242,11 @@ internal sealed class MainWindow : Window
 
     private void DrawSettings()
     {
-        // Open by default: the step scale needs calibrating per setup, so hiding it
-        // behind a closed header would be hiding the first thing anyone has to touch.
+        // Open by default: there is little enough here that collapsing it would hide the
+        // whole panel to save one line.
         if (!ImGui.CollapsingHeader("Settings", ImGuiTreeNodeFlags.DefaultOpen))
         {
             return;
-        }
-
-        var stepScale = this.configuration.StepScale;
-        if (ImGui.SliderFloat("Step scale", ref stepScale, 0.01f, 2.0f, "%.3f"))
-        {
-            this.configuration.StepScale = stepScale;
-            this.saveConfiguration();
-        }
-
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "Leave at 1.000.\n\n" +
-                "The add-on reprojects each frame assuming the camera moved exactly as\n" +
-                "far as it asked, so anything else puts the camera where the shader does\n" +
-                "not think it is, and its focus control runs out of range before it can\n" +
-                "reach the subject.\n\n" +
-                "To change how far the camera travels, use the add-on's own blur radius.");
-        }
-
-        if (Math.Abs(this.configuration.StepScale - 1.0f) > 0.001f)
-        {
-            ImGui.TextColored(Bad, "Step scale is not 1.0 -- focus may be unreachable.");
         }
 
         var horizontalFov = this.configuration.PublishHorizontalFov;
@@ -243,19 +264,9 @@ internal sealed class MainWindow : Window
                 "another add-on expects vertical.");
         }
 
-        var invert = this.configuration.InvertStepDirection;
-        if (ImGui.Checkbox("Invert step direction", ref invert))
-        {
-            this.configuration.InvertStepDirection = invert;
-            this.saveConfiguration();
-        }
+        ImGui.Separator();
 
-        if (ImGui.IsItemHovered())
-        {
-            ImGui.SetTooltip(
-                "Only if the add-on focuses on the background when asked to focus on\n" +
-                "the foreground. That is what a mirrored step direction looks like.");
-        }
+        this.DrawFreezeSettings();
 
         ImGui.Separator();
 
@@ -271,6 +282,68 @@ internal sealed class MainWindow : Window
             ImGui.TextColored(
                 Bad,
                 "An untethered camera during normal play sees through walls and terrain.");
+        }
+    }
+
+    /// <summary>
+    /// The two "hold the scene still" settings, which are about the subject rather than the
+    /// camera and so are kept apart from the calibration controls above.
+    /// </summary>
+    private void DrawFreezeSettings()
+    {
+        var freezePhysics = this.configuration.FreezePhysicsDuringSession;
+
+        // Greyed rather than hidden. A missing signature is worth seeing: it is the one
+        // thing here that a game patch can take away, and silently dropping the freeze
+        // would show up later as ghosting nobody could account for.
+        using (ImRaii.Disabled(!this.physicsFreeze.Available))
+        {
+            if (ImGui.Checkbox("Freeze physics during a stack", ref freezePhysics))
+            {
+                this.configuration.FreezePhysicsDuringSession = freezePhysics;
+                this.saveConfiguration();
+            }
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Stops hair, cloth and tails moving for the seconds a stack takes.\n" +
+                "Group Pose does not do this on its own, and a swinging skirt ghosts\n" +
+                "harder across a stack than anything else in shot.\n\n" +
+                "Applies to every character in frame, not just yours.");
+        }
+
+        if (this.physicsFreeze.UnavailableReason is { } reason)
+        {
+            ImGui.TextColored(Bad, reason);
+            ImGui.TextWrapped(
+                "Everything else still works. Freeze physics in Brio instead until this " +
+                "plugin is updated for the new game version.");
+        }
+
+        var pauseWorld = this.configuration.PauseWorldDuringSession;
+        if (ImGui.Checkbox("Pause the world during a stack", ref pauseWorld))
+        {
+            this.configuration.PauseWorldDuringSession = pauseWorld;
+            this.saveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Stops the game's clock, so water, foliage, weather and particles hold\n" +
+                "still along with the actors.\n\n" +
+                "There is no narrower way to reach those, so this stops everything else\n" +
+                "the game ticks as well -- chat and movement included. It releases when\n" +
+                "the stack ends, and after twenty minutes regardless.");
+        }
+
+        if (pauseWorld)
+        {
+            ImGui.TextColored(
+                Muted,
+                "The game stops responding for the length of a stack.");
         }
     }
 }

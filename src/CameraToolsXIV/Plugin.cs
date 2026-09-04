@@ -2,6 +2,7 @@ using System;
 using CameraToolsXIV.Camera;
 using CameraToolsXIV.Igcs;
 using CameraToolsXIV.Ui;
+using CameraToolsXIV.World;
 using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
@@ -43,6 +44,8 @@ public sealed class Plugin : IDalamudPlugin
     private ScreenshotSession? session;
     private IgcsBridge? bridge;
     private ConnectorLink? connector;
+    private PhysicsFreeze? physicsFreeze;
+    private WorldPause? worldPause;
     private MainWindow? window;
 
     private bool initializeAttempted;
@@ -73,9 +76,13 @@ public sealed class Plugin : IDalamudPlugin
 
         this.camera = new CameraController(this.interop, this.log);
         this.camera.TransformSettled = this.PublishCameraData;
-        this.session = new ScreenshotSession(this.camera, this.configuration, this.log);
+        this.session = new ScreenshotSession(this.camera, this.log);
         this.bridge = new IgcsBridge(this.log);
         this.connector = new ConnectorLink(this.log);
+
+        this.physicsFreeze = new PhysicsFreeze(this.interop, this.log);
+        this.physicsFreeze.Initialize();
+        this.worldPause = new WorldPause(this.log);
 
         this.window = new MainWindow(
             this.configuration,
@@ -83,6 +90,8 @@ public sealed class Plugin : IDalamudPlugin
             this.session,
             this.bridge,
             this.connector,
+            this.physicsFreeze,
+            this.worldPause,
             this.IsCameraAllowed,
             this.SaveConfiguration);
 
@@ -160,6 +169,16 @@ public sealed class Plugin : IDalamudPlugin
         // SetArmed no longer releases a hold, so this is safe even though a session can
         // start on the render thread at any point during this call.
         this.camera.SetArmed(this.IsCameraAllowed() && this.camera.LastSnapshot.Valid);
+
+        // Both of these are derived from the session rather than driven by it. A session
+        // starts and ends on ReShade's render thread, and neither of these may be touched
+        // from there: enabling a hook and writing the game's frame delta are both game-thread
+        // work. Deriving them here costs up to a frame of latency at the start of a stack,
+        // which does not matter -- depth of field steps the camera and then waits several
+        // frames to settle before it captures anything.
+        var freezing = this.session!.Active;
+        this.physicsFreeze!.SetFrozen(this.configuration!.FreezePhysicsDuringSession && freezing);
+        this.worldPause!.SetPaused(this.configuration.PauseWorldDuringSession && freezing);
 
         // Camera data is published from the camera update itself, not here, so that what
         // the add-on reads always describes the frame about to be rendered.
@@ -267,6 +286,12 @@ public sealed class Plugin : IDalamudPlugin
         this.session?.Abort();
         this.camera?.SetArmed(false);
         this.camera?.Dispose();
+
+        // After the abort, so nothing can re-enter a freeze behind the teardown. Leaving
+        // either of these applied would outlive the plugin: a hook the game keeps calling,
+        // and a world that never starts moving again.
+        this.physicsFreeze?.Dispose();
+        this.worldPause?.Dispose();
 
         // Last: releases the references held on the add-on modules, which must outlive
         // every write to their buffers above.
