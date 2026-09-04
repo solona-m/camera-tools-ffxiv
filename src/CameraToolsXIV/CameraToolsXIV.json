@@ -4,7 +4,7 @@
   "Author": "Solona",
   "Punchline": "Free camera that ReShade add-ons can drive, for accumulation depth of field.",
   "Description": "An untethered free camera for Group Pose that also presents itself to ReShade as an IGCS camera tool. This lets accumulation depth-of-field add-ons -- iMMERSE Parallax DoF and Otis_Inf's IGCS DoF -- drive the camera to stack frames, along with panorama and multishot capture.\n\nRequires ReShade 6.4+ with add-on support and a compatible depth-of-field add-on.",
-  "RepoUrl": "https://github.com/solona/camera-tools-ffxiv",
+  "RepoUrl": "https://github.com/solona-m/camera-tools-ffxiv",
   "Tags": [
     "camera",
     "gpose",
