@@ -120,27 +120,30 @@ internal sealed unsafe class CameraController : IDisposable
         get { lock (this.gate) { return this.holding; } }
     }
 
-    public bool Arm()
-    {
-        if (!this.LastSnapshot.Valid)
-        {
-            return false;
-        }
-
-        lock (this.gate)
-        {
-            this.armed = true;
-        }
-
-        return true;
-    }
-
-    public void Disarm()
+    /// <summary>
+    /// Sets whether add-ons may drive the camera. Driven automatically from the game
+    /// state rather than by the user.
+    /// </summary>
+    /// <remarks>
+    /// Arming has no effect on the camera by itself, so there is nothing to be gained by
+    /// making it a manual step: an add-on's depth-of-field UI stays hidden until it sees
+    /// this flag, and the camera is still only taken over for the duration of a stack.
+    /// </remarks>
+    public void SetArmed(bool value)
     {
         lock (this.gate)
         {
-            this.armed = false;
-            this.ReleaseHoldLocked();
+            if (this.armed == value)
+            {
+                return;
+            }
+
+            this.armed = value;
+
+            if (!value)
+            {
+                this.ReleaseHoldLocked();
+            }
         }
     }
 

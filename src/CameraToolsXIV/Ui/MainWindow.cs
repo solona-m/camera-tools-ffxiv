@@ -3,7 +3,6 @@ using System.Numerics;
 using CameraToolsXIV.Camera;
 using CameraToolsXIV.Igcs;
 using Dalamud.Bindings.ImGui;
-using Dalamud.Interface.Utility.Raii;
 using Dalamud.Interface.Windowing;
 
 namespace CameraToolsXIV.Ui;
@@ -106,43 +105,27 @@ internal sealed class MainWindow : Window
 
         if (this.session.Active)
         {
-            // Disarming mid-stack would abandon the session partway through and leave the
-            // add-on waiting on a camera that stopped responding.
             ImGui.TextColored(Good, "Camera held by the add-on for this stack.");
             return;
         }
 
-        // Arming outside the permitted game state would be undone on the next frame, so
-        // refuse it here rather than let the checkbox flick back on its own.
-        var armed = this.camera.Armed;
-        var permitted = this.isCameraAllowed();
-
-        using (ImRaii.Disabled(!permitted && !armed))
+        // Availability is derived from the game state, not chosen by the user: arming has
+        // no effect on its own, so a manual toggle would be friction for nothing.
+        if (this.camera.Armed)
         {
-            if (ImGui.Checkbox("Available to ReShade add-ons", ref armed))
-            {
-                if (armed)
-                {
-                    this.camera.Arm();
-                }
-                else
-                {
-                    this.camera.Disarm();
-                }
-            }
+            ImGui.TextColored(Good, "Camera available -- depth of field can run.");
+            ImGui.TextWrapped(
+                "Frame the shot however you like -- Group Pose, Cammy, Brio. The camera is " +
+                "only taken over while an add-on is stacking frames, and handed straight " +
+                "back afterwards.");
         }
-
-        if (!permitted)
+        else
         {
-            ImGui.TextColored(
-                Muted,
-                "Available in Group Pose. Enable \"Allow outside Group Pose\" below to use it anywhere.");
+            ImGui.TextColored(Muted, "Camera not available.");
+            ImGui.TextWrapped(
+                "Enter Group Pose to make the camera available to ReShade add-ons, or turn " +
+                "on \"Allow outside Group Pose\" below.");
         }
-
-        ImGui.TextWrapped(
-            "Frame the shot however you like -- Group Pose, Cammy, Brio. The camera is " +
-            "only taken over while an add-on is stacking frames, and handed straight back " +
-            "afterwards.");
     }
 
     private void DrawLiveValues()

@@ -136,13 +136,16 @@ public sealed class Plugin : IDalamudPlugin
         this.camera!.EnsureHooked();
         this.connector!.TryConnect();
 
-        // Drop everything the moment we are no longer allowed to hold the camera, so that
-        // leaving Group Pose mid-stack can never strand the player with a frozen camera.
-        if (this.camera.Armed && !this.IsCameraAllowed())
+        // Availability follows the game state directly. Abort first so that leaving Group
+        // Pose mid-stack tears the session down in order rather than pulling the camera
+        // out from under an add-on that still thinks it owns it.
+        var allowed = this.IsCameraAllowed();
+        if (!allowed && this.session!.Active)
         {
-            this.session!.Abort();
-            this.camera.Disarm();
+            this.session.Abort();
         }
+
+        this.camera.SetArmed(allowed && this.camera.LastSnapshot.Valid);
 
         this.PublishCameraData();
     }
@@ -237,7 +240,7 @@ public sealed class Plugin : IDalamudPlugin
         this.bridge?.Dispose();
         this.connector?.PublishDisabled();
         this.session?.Abort();
-        this.camera?.Disarm();
+        this.camera?.SetArmed(false);
         this.camera?.Dispose();
 
         this.log.Information("Camera Tools unloaded.");
