@@ -42,6 +42,16 @@ namespace
     SRWLOCK g_lock = SRWLOCK_INIT;
     IgcsCallbacks g_callbacks = {};
     bool g_registered = false;
+
+    // Identifies the current registration.
+    //
+    // One shim is shared by every copy of the plugin in the process, and two can easily be
+    // live at once -- a dev build beside an installed one is the normal case while
+    // iterating. Without a token, whichever unloaded first would clear the callbacks out
+    // from under the one still running, and the add-on would spend the rest of the session
+    // being told there is no camera tool while a working instance sat there unused.
+    uint64_t g_token = 0;
+    uint64_t g_nextToken = 1;
 }
 
 extern "C"
@@ -95,37 +105,50 @@ extern "C"
 
     // --- Called by the managed plugin -------------------------------------------------
 
-    // Installs the managed callbacks. Passing null clears them, same as Unregister.
-    void IGCSBRIDGE_Register(const IgcsCallbacks* callbacks)
+    // Installs the managed callbacks and returns a token identifying this registration.
+    // The most recent registration wins, so a reloaded plugin takes over cleanly from the
+    // instance it replaced. Returns 0 if nothing was registered.
+    uint64_t IGCSBRIDGE_Register(const IgcsCallbacks* callbacks)
+    {
+        if (callbacks == nullptr)
+        {
+            return 0;
+        }
+
+        AcquireSRWLockExclusive(&g_lock);
+        g_callbacks = *callbacks;
+        g_registered = true;
+        g_token = g_nextToken++;
+        const uint64_t issued = g_token;
+        ReleaseSRWLockExclusive(&g_lock);
+
+        return issued;
+    }
+
+    // Clears the callbacks, but only if the caller still owns them.
+    //
+    // Blocks until any in-flight add-on call has returned, so the plugin can unload without
+    // leaving the render thread holding a pointer into freed managed code. A token that no
+    // longer matches means another instance has registered since; clearing then would
+    // disconnect that instance rather than this one, so it is ignored.
+    void IGCSBRIDGE_Unregister(uint64_t token)
     {
         AcquireSRWLockExclusive(&g_lock);
-        if (callbacks == nullptr)
+        if (token != 0 && token == g_token)
         {
             g_callbacks = {};
             g_registered = false;
-        }
-        else
-        {
-            g_callbacks = *callbacks;
-            g_registered = true;
+            g_token = 0;
         }
         ReleaseSRWLockExclusive(&g_lock);
     }
 
-    // Blocks until any in-flight add-on call has returned, so the plugin can unload
-    // without leaving the render thread holding a pointer into freed managed code.
-    void IGCSBRIDGE_Unregister()
-    {
-        AcquireSRWLockExclusive(&g_lock);
-        g_callbacks = {};
-        g_registered = false;
-        ReleaseSRWLockExclusive(&g_lock);
-    }
-
-    // Lets the plugin verify it loaded the DLL it expected.
+    // Lets the plugin verify it found the DLL it expected, and which contract it speaks.
+    // Version 2 added the registration token: an older shim cannot be shared safely,
+    // because its Unregister clears unconditionally.
     uint32_t IGCSBRIDGE_GetVersion()
     {
-        return 1;
+        return 2;
     }
 }
 

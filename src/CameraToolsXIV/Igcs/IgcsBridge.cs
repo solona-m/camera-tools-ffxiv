@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using Dalamud.Plugin.Services;
@@ -63,8 +64,12 @@ internal sealed unsafe class IgcsBridge : IDisposable
     private MoveCameraMultishotDelegate? multishotCallback;
     private EndScreenshotSessionDelegate? endCallback;
 
+    /// <summary>Shim contract this build understands. See IGCSBRIDGE_GetVersion.</summary>
+    private const uint RequiredShimVersion = 2;
+
     private ScreenshotSession? session;
     private nint module;
+    private ulong token;
 
     public IgcsBridge(IPluginLog log) => this.log = log;
 
@@ -80,21 +85,47 @@ internal sealed unsafe class IgcsBridge : IDisposable
             return true;
         }
 
-        var path = Path.Combine(pluginDirectory, "IgcsBridge.dll");
-        if (!File.Exists(path))
-        {
-            this.Fail($"IgcsBridge.dll not found at {path}. Build src/native/IgcsBridge.");
-            return false;
-        }
+        // Reuse a shim already mapped into this process before loading another.
+        //
+        // Windows keys modules on path, so a dev build and an installed build would map two
+        // distinct IgcsBridge.dlls. An add-on binds to whichever exports the symbol first
+        // and never re-checks, so when one plugin unloads its shim keeps answering "no
+        // camera tool" for the rest of the session while the other instance sits there
+        // working and unused. One shared shim, with the registration token deciding who
+        // owns it, makes two live instances harmless.
+        this.module = FindLoadedShim(this.log);
 
-        try
+        if (this.module != nint.Zero)
         {
-            this.module = NativeLibrary.Load(path);
+            this.log.Information("Reusing an IgcsBridge already loaded in this process.");
         }
-        catch (Exception ex)
+        else
         {
-            this.Fail($"Failed to load IgcsBridge.dll: {ex.Message}");
-            return false;
+            var source = Path.Combine(pluginDirectory, "IgcsBridge.dll");
+            if (!File.Exists(source))
+            {
+                this.Fail($"IgcsBridge.dll not found at {source}. Build src/native/IgcsBridge.");
+                return false;
+            }
+
+            // Load a copy, never the file in the plugin directory.
+            //
+            // A mapped DLL is locked for as long as it stays mapped, and this one is never
+            // unmapped -- add-ons cache pointers into it, so unloading would leave them
+            // dangling. For a dev plugin the plugin directory IS the build output, so
+            // loading in place means the game holds the build's own IgcsBridge.dll open and
+            // every rebuild fails on a file-copy error until the game is closed.
+            var path = CopyForLoading(source, this.log) ?? source;
+
+            try
+            {
+                this.module = NativeLibrary.Load(path);
+            }
+            catch (Exception ex)
+            {
+                this.Fail($"Failed to load IgcsBridge.dll: {ex.Message}");
+                return false;
+            }
         }
 
         if (!NativeLibrary.TryGetExport(this.module, "IGCSBRIDGE_Register", out var registerAddress))
@@ -118,9 +149,100 @@ internal sealed unsafe class IgcsBridge : IDisposable
             EndScreenshotSession = Marshal.GetFunctionPointerForDelegate(this.endCallback),
         };
 
-        ((delegate* unmanaged[Cdecl]<Callbacks*, void>)registerAddress)(&callbacks);
-        this.log.Information("IgcsBridge loaded; IGCS exports are live.");
+        this.token = ((delegate* unmanaged[Cdecl]<Callbacks*, ulong>)registerAddress)(&callbacks);
+        if (this.token == 0)
+        {
+            this.Fail("IgcsBridge refused the registration.");
+            return false;
+        }
+
+        this.log.Information($"IgcsBridge loaded; IGCS exports are live (registration {this.token}).");
         return true;
+    }
+
+    /// <summary>
+    /// Finds a compatible shim already mapped into this process, or zero if there is none.
+    /// </summary>
+    /// <remarks>
+    /// Version 2 introduced the registration token. An older shim cannot be shared, because
+    /// its Unregister clears unconditionally, so an older instance unloading would take
+    /// this one down with it. Mapping our own and accepting the duplicate is the lesser
+    /// problem.
+    /// </remarks>
+    private static nint FindLoadedShim(IPluginLog log)
+    {
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            foreach (ProcessModule module in process.Modules)
+            {
+                var handle = module.BaseAddress;
+                if (handle == nint.Zero ||
+                    !NativeLibrary.TryGetExport(handle, "IGCSBRIDGE_GetVersion", out var versionAddress) ||
+                    !NativeLibrary.TryGetExport(handle, "IGCSBRIDGE_Register", out _))
+                {
+                    continue;
+                }
+
+                var version = ((delegate* unmanaged[Cdecl]<uint>)versionAddress)();
+                if (version >= RequiredShimVersion)
+                {
+                    return handle;
+                }
+
+                log.Warning($"An IgcsBridge of version {version} is loaded and cannot be shared; loading our own.");
+            }
+        }
+        catch (Exception ex)
+        {
+            log.Debug(ex, "Could not scan for an existing IgcsBridge.");
+        }
+
+        return nint.Zero;
+    }
+
+    /// <summary>
+    /// Copies the shim somewhere disposable and returns that path, or null to load in place.
+    /// </summary>
+    /// <remarks>
+    /// The copy is what gets locked, leaving the build output free to be overwritten while
+    /// the game runs. Names are unique per load because a previous copy may still be mapped
+    /// from an earlier plugin reload; stale ones from previous sessions are swept up on the
+    /// way past, and any that are still mapped simply refuse to delete.
+    /// </remarks>
+    private static string? CopyForLoading(string source, IPluginLog log)
+    {
+        try
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "CameraToolsXIV");
+            Directory.CreateDirectory(directory);
+
+            foreach (var stale in Directory.EnumerateFiles(directory, "IgcsBridge-*.dll"))
+            {
+                try
+                {
+                    File.Delete(stale);
+                }
+                catch (IOException)
+                {
+                    // Still mapped by this process or another. It will go on the next run.
+                }
+                catch (UnauthorizedAccessException)
+                {
+                }
+            }
+
+            var path = Path.Combine(directory, $"IgcsBridge-{Guid.NewGuid():N}.dll");
+            File.Copy(source, path, overwrite: true);
+            return path;
+        }
+        catch (Exception ex)
+        {
+            // Falling back to loading in place still works; it just holds the build output
+            // open, which matters only on a developer's machine.
+            log.Warning(ex, "Could not stage a copy of IgcsBridge.dll; loading it in place.");
+            return null;
+        }
     }
 
     private void Fail(string message)
@@ -194,10 +316,16 @@ internal sealed unsafe class IgcsBridge : IDisposable
         // any in-flight add-on call to return, so the render thread cannot be inside one
         // of our callbacks by the time this comes back. Skipping it would leave the
         // add-on holding pointers into a load context that is about to be unloaded.
-        if (NativeLibrary.TryGetExport(this.module, "IGCSBRIDGE_Unregister", out var unregisterAddress))
+        // Passing our token means this clears the callbacks only if we still own them. If
+        // another copy of the plugin has registered since, it keeps working instead of
+        // being silently disconnected by our unload.
+        if (this.token != 0 &&
+            NativeLibrary.TryGetExport(this.module, "IGCSBRIDGE_Unregister", out var unregisterAddress))
         {
-            ((delegate* unmanaged[Cdecl]<void>)unregisterAddress)();
+            ((delegate* unmanaged[Cdecl]<ulong, void>)unregisterAddress)(this.token);
         }
+
+        this.token = 0;
 
         this.session = null;
         this.startCallback = null;

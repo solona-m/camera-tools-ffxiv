@@ -109,6 +109,11 @@ override.
 Build the native shim first if building by hand — the plugin only packages
 `IgcsBridge.dll` if it already exists on disk.
 
+You can rebuild while the game is running. The plugin loads the shim from a copy in the
+temp directory rather than in place, because a mapped DLL stays locked and this one is
+never unmapped — add-ons cache pointers into it. Loading it in place would mean the game
+holds the build's own `IgcsBridge.dll` open and every rebuild fails on a file-copy error.
+
 The build also runs `tests/IgcsBridgeHarness`, which exercises the add-on boundary
 without needing the game: it registers callbacks the way the plugin does, then discovers
 and calls the exports the way an add-on does. Marshalling mistakes there produce

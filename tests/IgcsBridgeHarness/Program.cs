@@ -57,9 +57,11 @@ var panoramaCallback = new MoveCameraPanoramaDelegate(Recorder.OnPanorama);
 var multishotCallback = new MoveCameraMultishotDelegate(Recorder.OnMultishot);
 var endCallback = new EndScreenshotSessionDelegate(Recorder.OnEnd);
 
+ulong token;
+
 unsafe
 {
-    var register = (delegate* unmanaged[Cdecl]<Callbacks*, void>)
+    var register = (delegate* unmanaged[Cdecl]<Callbacks*, ulong>)
         NativeLibrary.GetExport(module, "IGCSBRIDGE_Register");
 
     var callbacks = new Callbacks
@@ -70,7 +72,7 @@ unsafe
         EndScreenshotSession = Marshal.GetFunctionPointerForDelegate(endCallback),
     };
 
-    register(&callbacks);
+    token = register(&callbacks);
 }
 
 // --- The add-on's side: discover by module scan, then drive the camera -------------
@@ -136,11 +138,41 @@ unsafe
     end();
     Check("end session invoked", Recorder.EndCount == 1, $"got {Recorder.EndCount}");
 
-    // --- Unregistration must make the exports inert, not dangling ------------------
+    // --- A stale unregister must not disconnect a live registration ----------------
+    //
+    // One shim is shared by every copy of the plugin in the process, and two are live at
+    // once whenever a dev build sits beside an installed one. Whichever unloads first must
+    // not clear the callbacks out from under the other, or the add-on spends the rest of
+    // the session being told there is no camera tool while a working instance goes unused.
 
-    var unregister = (delegate* unmanaged[Cdecl]<void>)
+    var register = (delegate* unmanaged[Cdecl]<Callbacks*, ulong>)
+        NativeLibrary.GetExport(module, "IGCSBRIDGE_Register");
+    var unregister = (delegate* unmanaged[Cdecl]<ulong, void>)
         NativeLibrary.GetExport(module, "IGCSBRIDGE_Unregister");
-    unregister();
+
+    Check("register issues a token", token != 0, $"got {token}");
+
+    var second = new Callbacks
+    {
+        StartScreenshotSession = Marshal.GetFunctionPointerForDelegate(startCallback),
+        MoveCameraPanorama = Marshal.GetFunctionPointerForDelegate(panoramaCallback),
+        MoveCameraMultishot = Marshal.GetFunctionPointerForDelegate(multishotCallback),
+        EndScreenshotSession = Marshal.GetFunctionPointerForDelegate(endCallback),
+    };
+    var secondToken = register(&second);
+    Check("a second registration gets a distinct token", secondToken != 0 && secondToken != token,
+        $"first {token}, second {secondToken}");
+
+    // The first instance unloading now. Its token is stale, so this must do nothing.
+    unregister(token);
+    Recorder.LastType = 0;
+    var afterStale = start(1);
+    Check("stale unregister leaves the live registration intact", afterStale == 0, $"got {afterStale}");
+    Check("the live callbacks still fire", Recorder.LastType == 1, $"got {Recorder.LastType}");
+
+    // --- The owner unregistering must make the exports inert, not dangling ---------
+
+    unregister(secondToken);
 
     var afterUnregister = start(1);
 
