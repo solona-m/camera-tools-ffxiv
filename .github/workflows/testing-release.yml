@@ -110,6 +110,13 @@ jobs:
         env:
           PLUGINS_REPO_TOKEN: ${{ secrets.PLUGINS_REPO_TOKEN }}
         run: |
+          # See release.yml: a missing token delays the listing rather than failing a build whose
+          # release already exists, since the plugins repo also syncs nightly.
+          if (-not $env:PLUGINS_REPO_TOKEN) {
+            Write-Host "::warning::PLUGINS_REPO_TOKEN is not set, so the plugins repo was not notified. It will pick this release up on its nightly sync, or you can run its Sync workflow by hand."
+            exit 0
+          }
+
           $headers = @{
             Authorization = "Bearer $env:PLUGINS_REPO_TOKEN"
             Accept        = "application/vnd.github+json"
