@@ -2,8 +2,8 @@
   "Name": "Camera Tools",
   "InternalName": "CameraToolsXIV",
   "Author": "Solona",
-  "Punchline": "Free camera that ReShade add-ons can drive, for accumulation depth of field.",
-  "Description": "An untethered free camera for Group Pose that also presents itself to ReShade as an IGCS camera tool. This lets accumulation depth-of-field add-ons -- iMMERSE Parallax DoF and Otis_Inf's IGCS DoF -- drive the camera to stack frames, along with panorama and multishot capture.\n\nRequires ReShade 6.4+ with add-on support and a compatible depth-of-field add-on.",
+  "Punchline": "Lets ReShade's accumulation depth-of-field add-ons drive the GPose camera.",
+  "Description": "• Presents FFXIV's camera to ReShade as an IGCS camera tool, which is what accumulation depth-of-field add-ons need in order to work. Nothing has ever provided one for FFXIV before.\n\n• Works with iMMERSE Parallax DoF and Otis_Inf's IGCS Depth of Field, and with their panorama and multishot capture.\n\n• Frame the shot however you already do — Group Pose, Cammy, Brio. The camera is only taken over while an add-on is stacking frames, and handed straight back afterwards, so this does not compete with anything else you use.\n\n• Requires ReShade 6.4+ with add-on support, plus a compatible depth-of-field add-on.\n\nType /camtools to see whether an add-on is connected.",
   "RepoUrl": "https://github.com/solona-m/camera-tools-ffxiv",
   "Tags": [
     "camera",

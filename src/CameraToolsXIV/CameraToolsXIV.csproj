@@ -8,7 +8,7 @@
     <Changelog Condition="'$(Changelog)' == ''"></Changelog>
     <Authors>Solona</Authors>
     <Company />
-    <Description>Free camera for FFXIV that presents itself to ReShade as an IGCS camera tool, enabling iMMERSE Parallax DoF and IGCS DoF.</Description>
+    <Description>Presents FFXIV's camera to ReShade as an IGCS camera tool, so accumulation depth-of-field add-ons such as iMMERSE Parallax DoF and IGCS DoF can drive it.</Description>
     <PackageProjectUrl>https://github.com/solona-m/camera-tools-ffxiv</PackageProjectUrl>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>enable</Nullable>
