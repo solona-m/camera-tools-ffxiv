@@ -87,6 +87,19 @@ internal sealed unsafe class CameraController : IDisposable
 
     private CameraSnapshot lastSnapshot = CameraSnapshot.Invalid;
 
+    /// <summary>
+    /// Invoked on the game thread immediately after the camera transform is settled for
+    /// the frame.
+    /// </summary>
+    /// <remarks>
+    /// Publishing from here rather than from a framework tick matters: a tick has no
+    /// ordering guarantee against the camera update, so it can describe the previous
+    /// frame's camera. The add-on reprojects against the data we publish, and feeding it
+    /// a frame-old position is indistinguishable to it from the camera having moved
+    /// somewhere it did not.
+    /// </remarks>
+    public Action? TransformSettled { get; set; }
+
     public CameraController(IGameInteropProvider interop, IPluginLog log)
     {
         this.interop = interop;
@@ -399,6 +412,10 @@ internal sealed unsafe class CameraController : IDisposable
 
             this.lastSnapshot = new CameraSnapshot(true, eye, basis, fov, scenePosition);
         }
+
+        // Outside the lock: the callback publishes to the add-on and must not be able to
+        // hold up the camera update, or be re-entered while the lock is held.
+        this.TransformSettled?.Invoke();
     }
 
     private static GameCameraBase* GetActiveCamera()

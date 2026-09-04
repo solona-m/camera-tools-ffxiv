@@ -72,6 +72,7 @@ public sealed class Plugin : IDalamudPlugin
         this.configuration = this.pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
         this.camera = new CameraController(this.interop, this.log);
+        this.camera.TransformSettled = this.PublishCameraData;
         this.session = new ScreenshotSession(this.camera, this.configuration, this.log);
         this.bridge = new IgcsBridge(this.log);
         this.connector = new ConnectorLink(this.log);
@@ -153,7 +154,8 @@ public sealed class Plugin : IDalamudPlugin
 
         this.camera.SetArmed(allowed && this.camera.LastSnapshot.Valid);
 
-        this.PublishCameraData();
+        // Camera data is published from the camera update itself, not here, so that what
+        // the add-on reads always describes the frame about to be rendered.
     }
 
     /// <summary>
@@ -243,6 +245,13 @@ public sealed class Plugin : IDalamudPlugin
         // Order matters on unload: stop the add-on being able to call us, tell it the
         // camera is gone, then release the camera itself. Aborting after the bridge is
         // disposed means no in-flight session call can re-acquire the hold behind us.
+        // Detach first: this fires from the game's camera update, and must not run against
+        // a connector that is being torn down underneath it.
+        if (this.camera is not null)
+        {
+            this.camera.TransformSettled = null;
+        }
+
         this.bridge?.Dispose();
         this.connector?.PublishDisabled();
         this.session?.Abort();
