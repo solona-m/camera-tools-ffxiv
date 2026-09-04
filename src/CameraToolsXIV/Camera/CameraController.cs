@@ -23,9 +23,21 @@ internal readonly record struct CameraSnapshot(
     Vector3 Position,
     ViewBasis Basis,
     float FovRadians,
-    Vector3 ScenePosition)
+    Vector3 ScenePosition,
+    float AspectRatio)
 {
-    public static CameraSnapshot Invalid => new(false, Vector3.Zero, ViewBasis.Identity, 0f, Vector3.Zero);
+    public static CameraSnapshot Invalid => new(false, Vector3.Zero, ViewBasis.Identity, 0f, Vector3.Zero, 1f);
+
+    /// <summary>
+    /// Horizontal field of view in radians, derived from the vertical one.
+    /// </summary>
+    /// <remarks>
+    /// FFXIV stores a vertical FoV. Marty's Parallax DoF declares its uniform as
+    /// "hor FOV, rad" and scales its reprojection by <c>tan(FOV * 0.5)</c>, so handing it
+    /// the vertical angle understates the scale by the aspect ratio.
+    /// </remarks>
+    public float HorizontalFovRadians
+        => 2f * MathF.Atan(MathF.Tan(this.FovRadians * 0.5f) * (this.AspectRatio > 0f ? this.AspectRatio : 1f));
 }
 
 /// <summary>
@@ -381,6 +393,7 @@ internal sealed unsafe class CameraController : IDisposable
         Vector3 sceneLookAt = scene->LookAtVector;
         var basis = ViewBasis.FromViewMatrix(render->ViewMatrix);
         var fov = render->FoV;
+        var aspect = render->AspectRatio;
 
         // The eye position recovered from the view matrix, which is the camera's true
         // world position by definition. The scene camera's own Position field is not
@@ -410,7 +423,7 @@ internal sealed unsafe class CameraController : IDisposable
                 basis = this.holdBasis;
             }
 
-            this.lastSnapshot = new CameraSnapshot(true, eye, basis, fov, scenePosition);
+            this.lastSnapshot = new CameraSnapshot(true, eye, basis, fov, scenePosition, aspect);
         }
 
         // Outside the lock: the callback publishes to the add-on and must not be able to

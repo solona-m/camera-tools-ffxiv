@@ -47,4 +47,16 @@ public sealed class Configuration : IPluginConfiguration
     /// cannot be verified without running a stack, and flipping it is a decisive test.
     /// </remarks>
     public bool InvertStepDirection { get; set; }
+
+    /// <summary>
+    /// Publishes horizontal field of view rather than the vertical one the game stores.
+    /// </summary>
+    /// <remarks>
+    /// Marty's Parallax DoF declares its FoV uniform as "hor FOV, rad" and scales its
+    /// reprojection by <c>tan(FOV * 0.5)</c>, so a vertical angle understates that scale by
+    /// the aspect ratio -- at 16:9, 44.7 degrees where roughly 72.4 is wanted. The IGCS
+    /// interface itself only says "degrees" without settling which, so this stays
+    /// switchable in case another add-on reads it the other way.
+    /// </remarks>
+    public bool PublishHorizontalFov { get; set; } = true;
 }

@@ -187,7 +187,10 @@ public sealed class Plugin : IDalamudPlugin
             CameraEnabled = (byte)(this.camera.Armed ? 1 : 0),
             CameraMovementLocked = (byte)(this.session!.Active ? 1 : 0),
             // The interface specifies degrees here while the game stores radians.
-            Fov = float.RadiansToDegrees(snapshot.FovRadians),
+            Fov = float.RadiansToDegrees(
+                this.configuration!.PublishHorizontalFov
+                    ? snapshot.HorizontalFovRadians
+                    : snapshot.FovRadians),
             Coordinates = snapshot.Position,
             LookQuaternion = snapshot.Basis.ToQuaternion(),
             Up = snapshot.Basis.Up,

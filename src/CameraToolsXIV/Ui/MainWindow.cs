@@ -151,7 +151,13 @@ internal sealed class MainWindow : Window
         ImGui.Indent();
         ImGui.TextUnformatted($"pos    {snapshot.Position.X,9:F3} {snapshot.Position.Y,9:F3} {snapshot.Position.Z,9:F3}");
         ImGui.TextUnformatted($"scene  {snapshot.ScenePosition.X,9:F3} {snapshot.ScenePosition.Y,9:F3} {snapshot.ScenePosition.Z,9:F3}");
-        ImGui.TextUnformatted($"fov    {float.RadiansToDegrees(snapshot.FovRadians),9:F3} deg");
+        var publishedFov = this.configuration.PublishHorizontalFov
+            ? snapshot.HorizontalFovRadians
+            : snapshot.FovRadians;
+        ImGui.TextUnformatted(
+            $"fov    {float.RadiansToDegrees(publishedFov),9:F3} deg " +
+            $"({(this.configuration.PublishHorizontalFov ? "horizontal" : "vertical")})");
+        ImGui.TextUnformatted($"vfov   {float.RadiansToDegrees(snapshot.FovRadians),9:F3} deg  aspect {snapshot.AspectRatio:F3}");
         ImGui.TextUnformatted($"right  {snapshot.Basis.Right.X,9:F3} {snapshot.Basis.Right.Y,9:F3} {snapshot.Basis.Right.Z,9:F3}");
         ImGui.TextUnformatted($"up     {snapshot.Basis.Up.X,9:F3} {snapshot.Basis.Up.Y,9:F3} {snapshot.Basis.Up.Z,9:F3}");
         ImGui.TextUnformatted($"fwd    {snapshot.Basis.Forward.X,9:F3} {snapshot.Basis.Forward.Y,9:F3} {snapshot.Basis.Forward.Z,9:F3}");
@@ -189,6 +195,21 @@ internal sealed class MainWindow : Window
         if (Math.Abs(this.configuration.StepScale - 1.0f) > 0.001f)
         {
             ImGui.TextColored(Bad, "Step scale is not 1.0 -- focus may be unreachable.");
+        }
+
+        var horizontalFov = this.configuration.PublishHorizontalFov;
+        if (ImGui.Checkbox("Publish horizontal FoV", ref horizontalFov))
+        {
+            this.configuration.PublishHorizontalFov = horizontalFov;
+            this.saveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Parallax DoF declares its FoV uniform as horizontal, but the game\n" +
+                "stores vertical. Leave this on for Marty's shaders; turn it off if\n" +
+                "another add-on expects vertical.");
         }
 
         var invert = this.configuration.InvertStepDirection;
