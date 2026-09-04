@@ -4,45 +4,77 @@ using CameraToolsXIV.Igcs;
 using CameraToolsXIV.Ui;
 using Dalamud.Game.Command;
 using Dalamud.Interface.Windowing;
-using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 
 namespace CameraToolsXIV;
 
+/// <summary>
+/// Plugin entry point.
+/// </summary>
+/// <remarks>
+/// The constructor does nothing but store the injected services and subscribe to the
+/// framework tick. Everything else happens in <see cref="Initialize"/> on the first
+/// frame, off Dalamud's plugin-load thread.
+/// <para>
+/// This is not stylistic. Dalamud constructs plugins on a load thread while holding
+/// assembly-loading locks, so real work there deadlocks the process instead of failing:
+/// the log stops at "Creating plugin instance" and the whole game degrades as other
+/// plugins queue behind the held locks. Two separate instances of that were hit here --
+/// taking the Windows loader lock via NativeLibrary.Load, and calling
+/// <c>Create&lt;Plugin&gt;()</c>, which builds a <i>new</i> instance of the type passed to
+/// it and so recurses into constructing another Plugin.
+/// </para>
+/// </remarks>
 public sealed class Plugin : IDalamudPlugin
 {
     private const string CommandName = "/camtools";
 
-    [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
-    [PluginService] internal static ICommandManager CommandManager { get; private set; } = null!;
-    [PluginService] internal static IFramework Framework { get; private set; } = null!;
-    [PluginService] internal static IClientState ClientState { get; private set; } = null!;
-    [PluginService] internal static IGameInteropProvider Interop { get; private set; } = null!;
-    [PluginService] internal static IPluginLog Log { get; private set; } = null!;
+    private readonly IDalamudPluginInterface pluginInterface;
+    private readonly ICommandManager commandManager;
+    private readonly IFramework framework;
+    private readonly IClientState clientState;
+    private readonly IGameInteropProvider interop;
+    private readonly IPluginLog log;
 
-    private readonly WindowSystem windowSystem = new("CameraToolsXIV");
-    private readonly Configuration configuration;
-    private readonly CameraController camera;
-    private readonly ScreenshotSession session;
-    private readonly IgcsBridge bridge;
-    private readonly ConnectorLink connector;
-    private readonly MainWindow window;
-    private readonly string pluginDirectory;
+    private WindowSystem? windowSystem;
+    private Configuration? configuration;
+    private CameraController? camera;
+    private ScreenshotSession? session;
+    private IgcsBridge? bridge;
+    private ConnectorLink? connector;
+    private MainWindow? window;
 
-    private bool bridgeLoadAttempted;
+    private bool initializeAttempted;
+    private bool ready;
+    private bool disposed;
 
-    public Plugin(IDalamudPluginInterface pluginInterface)
+    public Plugin(
+        IDalamudPluginInterface pluginInterface,
+        ICommandManager commandManager,
+        IFramework framework,
+        IClientState clientState,
+        IGameInteropProvider interop,
+        IPluginLog log)
     {
-        pluginInterface.Create<Plugin>();
+        this.pluginInterface = pluginInterface;
+        this.commandManager = commandManager;
+        this.framework = framework;
+        this.clientState = clientState;
+        this.interop = interop;
+        this.log = log;
 
-        this.configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        this.framework.Update += this.OnFrameworkUpdate;
+    }
 
-        this.camera = new CameraController(Interop, Log);
-        this.session = new ScreenshotSession(this.camera, Log);
-        this.bridge = new IgcsBridge(Log);
-        this.connector = new ConnectorLink(Log);
-        this.pluginDirectory = PluginInterface.AssemblyLocation.Directory?.FullName ?? string.Empty;
+    private void Initialize()
+    {
+        this.configuration = this.pluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+
+        this.camera = new CameraController(this.interop, this.log);
+        this.session = new ScreenshotSession(this.camera, this.log);
+        this.bridge = new IgcsBridge(this.log);
+        this.connector = new ConnectorLink(this.log);
 
         this.window = new MainWindow(
             this.configuration,
@@ -52,38 +84,63 @@ public sealed class Plugin : IDalamudPlugin
             this.connector,
             this.IsCameraAllowed,
             this.SaveConfiguration);
+
+        this.windowSystem = new WindowSystem("CameraToolsXIV");
         this.windowSystem.AddWindow(this.window);
 
-        PluginInterface.UiBuilder.Draw += this.windowSystem.Draw;
-        PluginInterface.UiBuilder.OpenMainUi += this.OpenMainUi;
-        PluginInterface.UiBuilder.OpenConfigUi += this.OpenMainUi;
-        Framework.Update += this.OnFrameworkUpdate;
+        this.pluginInterface.UiBuilder.Draw += this.DrawUi;
+        this.pluginInterface.UiBuilder.OpenMainUi += this.OpenMainUi;
+        this.pluginInterface.UiBuilder.OpenConfigUi += this.OpenMainUi;
 
-        CommandManager.AddHandler(CommandName, new CommandInfo(this.OnCommand)
+        this.commandManager.AddHandler(CommandName, new CommandInfo(this.OnCommand)
         {
             HelpMessage = "Open the camera tools window.",
         });
+
+        this.bridge.Load(this.pluginInterface.AssemblyLocation.Directory?.FullName ?? string.Empty, this.session);
+
+        this.ready = true;
+        this.log.Information("Camera Tools initialised.");
     }
 
     private void OnFrameworkUpdate(IFramework framework)
     {
-        // Deferred out of the constructor on purpose. Dalamud builds plugins on its own
-        // load thread while holding assembly-loading locks; taking the Windows loader
-        // lock underneath those deadlocks the whole process rather than just failing.
-        if (!this.bridgeLoadAttempted)
+        if (this.disposed)
         {
-            this.bridgeLoadAttempted = true;
-            this.bridge.Load(this.pluginDirectory, this.session);
+            return;
         }
 
-        this.camera.EnsureHooked();
-        this.connector.TryConnect();
+        if (!this.initializeAttempted)
+        {
+            // Set before the attempt, not after: if initialisation throws we want one
+            // logged failure, not the same exception every frame forever.
+            this.initializeAttempted = true;
+
+            try
+            {
+                this.Initialize();
+            }
+            catch (Exception ex)
+            {
+                this.log.Error(ex, "Camera Tools failed to initialise.");
+            }
+
+            return;
+        }
+
+        if (!this.ready)
+        {
+            return;
+        }
+
+        this.camera!.EnsureHooked();
+        this.connector!.TryConnect();
 
         // Drop everything the moment we are no longer allowed to hold the camera, so that
         // leaving Group Pose mid-stack can never strand the player with a frozen camera.
         if (this.camera.Armed && !this.IsCameraAllowed())
         {
-            this.session.Abort();
+            this.session!.Abort();
             this.camera.Disarm();
         }
 
@@ -94,19 +151,19 @@ public sealed class Plugin : IDalamudPlugin
     /// Publishes the camera state that ReShade add-ons read every frame.
     /// </summary>
     /// <remarks>
-    /// This runs unconditionally rather than only while the free camera is engaged. The
-    /// add-on needs live data to show a sensible UI and to decide whether to offer a
-    /// session at all; the <c>cameraEnabled</c> flag is what tells it whether the camera
-    /// can actually be driven.
+    /// This runs unconditionally rather than only while the camera is armed. The add-on
+    /// needs live data to show a sensible UI and to decide whether to offer a session at
+    /// all; the <c>cameraEnabled</c> flag is what tells it whether the camera can
+    /// actually be driven.
     /// </remarks>
     private void PublishCameraData()
     {
-        if (!this.connector.Connected)
+        if (!this.connector!.Connected)
         {
             return;
         }
 
-        var snapshot = this.camera.LastSnapshot;
+        var snapshot = this.camera!.LastSnapshot;
         if (!snapshot.Valid)
         {
             return;
@@ -117,7 +174,7 @@ public sealed class Plugin : IDalamudPlugin
         var data = new CameraToolsData
         {
             CameraEnabled = (byte)(this.camera.Armed ? 1 : 0),
-            CameraMovementLocked = (byte)(this.session.Active ? 1 : 0),
+            CameraMovementLocked = (byte)(this.session!.Active ? 1 : 0),
             // The interface specifies degrees here while the game stores radians.
             Fov = float.RadiansToDegrees(snapshot.FovRadians),
             Coordinates = snapshot.Position,
@@ -133,34 +190,56 @@ public sealed class Plugin : IDalamudPlugin
         this.connector.Publish(data);
     }
 
-    /// <summary>Whether the free camera may be engaged in the current game state.</summary>
+    /// <summary>Whether the camera may be taken over in the current game state.</summary>
     public bool IsCameraAllowed()
-        => this.configuration.AllowOutsideGpose || ClientState.IsGPosing;
+        => (this.configuration?.AllowOutsideGpose ?? false) || this.clientState.IsGPosing;
+
+    private void DrawUi() => this.windowSystem?.Draw();
 
     private void OnCommand(string command, string args) => this.OpenMainUi();
 
-    private void OpenMainUi() => this.window.Toggle();
+    private void OpenMainUi() => this.window?.Toggle();
 
-    public void SaveConfiguration() => PluginInterface.SavePluginConfig(this.configuration);
+    public void SaveConfiguration()
+    {
+        if (this.configuration is not null)
+        {
+            this.pluginInterface.SavePluginConfig(this.configuration);
+        }
+    }
 
     public void Dispose()
     {
-        CommandManager.RemoveHandler(CommandName);
+        if (this.disposed)
+        {
+            return;
+        }
 
-        Framework.Update -= this.OnFrameworkUpdate;
-        PluginInterface.UiBuilder.Draw -= this.windowSystem.Draw;
-        PluginInterface.UiBuilder.OpenMainUi -= this.OpenMainUi;
-        PluginInterface.UiBuilder.OpenConfigUi -= this.OpenMainUi;
+        this.disposed = true;
+        this.framework.Update -= this.OnFrameworkUpdate;
 
-        this.windowSystem.RemoveAllWindows();
+        // Initialisation may never have run, or may have thrown partway through, so every
+        // teardown step below has to tolerate a half-built plugin.
+        if (this.initializeAttempted)
+        {
+            this.commandManager.RemoveHandler(CommandName);
+
+            this.pluginInterface.UiBuilder.Draw -= this.DrawUi;
+            this.pluginInterface.UiBuilder.OpenMainUi -= this.OpenMainUi;
+            this.pluginInterface.UiBuilder.OpenConfigUi -= this.OpenMainUi;
+        }
+
+        this.windowSystem?.RemoveAllWindows();
 
         // Order matters on unload: stop the add-on being able to call us, tell it the
         // camera is gone, then release the camera itself. Aborting after the bridge is
         // disposed means no in-flight session call can re-acquire the hold behind us.
-        this.bridge.Dispose();
-        this.connector.PublishDisabled();
-        this.session.Abort();
-        this.camera.Disarm();
-        this.camera.Dispose();
+        this.bridge?.Dispose();
+        this.connector?.PublishDisabled();
+        this.session?.Abort();
+        this.camera?.Disarm();
+        this.camera?.Dispose();
+
+        this.log.Information("Camera Tools unloaded.");
     }
 }
