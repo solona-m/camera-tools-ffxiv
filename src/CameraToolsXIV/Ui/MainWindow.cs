@@ -87,6 +87,22 @@ internal sealed class MainWindow : Window
                 "Otis_Inf's IgcsConnector, then reload this plugin.");
         }
 
+        // The camera hook is separate from the ReShade link and fails separately. Without
+        // it the camera can be read but never driven, which otherwise only shows up as a
+        // stack that quietly does nothing.
+        if (this.camera.HookAbandoned)
+        {
+            ImGui.TextColored(Bad, "Camera hook failed -- add-ons cannot drive the camera");
+        }
+        else if (!this.camera.HookInstalled)
+        {
+            ImGui.TextColored(Muted, "Waiting to hook the camera...");
+        }
+        else
+        {
+            ImGui.TextColored(Good, "Camera hook installed");
+        }
+
         if (this.session.Active)
         {
             ImGui.TextColored(Good, "Add-on session in progress");

@@ -190,6 +190,15 @@ internal sealed unsafe class CameraController : IDisposable
     }
 
     /// <summary>
+    /// Whether the update hook is installed. Surfaced because without it the camera can be
+    /// read but not driven, and that difference is invisible until a stack fails.
+    /// </summary>
+    public bool HookInstalled => this.updateHook is not null;
+
+    /// <summary>Whether hooking failed outright and will not be retried.</summary>
+    public bool HookAbandoned => this.hookAbandoned;
+
+    /// <summary>
     /// Sets whether add-ons may drive the camera. Driven automatically from the game
     /// state rather than by the user.
     /// </summary>
@@ -425,7 +434,40 @@ internal sealed unsafe class CameraController : IDisposable
         }
     }
 
-    private void RefreshAndApply(GameCameraBase* camera)
+    /// <summary>
+    /// Reads the active camera without touching it. Safe to call from the framework tick.
+    /// </summary>
+    /// <remarks>
+    /// Reading never needed the hook — only writing does. Tying both to the update detour
+    /// meant that whenever it stopped firing, the snapshot expired, the camera reported
+    /// itself unavailable, and the add-on was told there was no camera tool. The plugin
+    /// then sat with both status lines green and a "waiting for the game camera" that
+    /// never cleared, which is indistinguishable from it being broken.
+    /// </remarks>
+    public void Refresh()
+    {
+        var camera = GetActiveCamera();
+        if (camera is null)
+        {
+            return;
+        }
+
+        try
+        {
+            this.RefreshAndApply(camera, applyHold: false);
+        }
+        catch (Exception ex)
+        {
+            var now = Environment.TickCount64;
+            if (now - this.lastErrorLogMs > ErrorLogIntervalMs)
+            {
+                this.lastErrorLogMs = now;
+                this.log.Error(ex, "Camera read failed.");
+            }
+        }
+    }
+
+    private void RefreshAndApply(GameCameraBase* camera, bool applyHold = true)
     {
         if (camera is null || camera != GetActiveCamera())
         {
@@ -461,18 +503,32 @@ internal sealed unsafe class CameraController : IDisposable
             this.rawPosition = scenePosition;
             this.rawLookAt = sceneLookAt;
 
+            // The write only happens from the update hook. A framework-tick read would be
+            // overwritten by the game's own update later in the frame, so applying a hold
+            // there would flicker rather than hold.
             if (this.holding)
             {
-                // Translate the position and the look-at point by the same offset. This
-                // preserves the framing the user set, and is a parallel shift whatever
-                // the engine's axis conventions turn out to be.
-                scene->Position = this.holdPosition + this.sessionOffset;
-                scene->LookAtVector = this.holdLookAt + this.sessionOffset;
-
-                if (this.fovOverrideRadians is { } overrideFov)
+                if (applyHold)
                 {
-                    render->FoV = overrideFov;
-                    fov = overrideFov;
+                    // Translate the position and the look-at point by the same offset. This
+                    // preserves the framing the user set, and is a parallel shift whatever
+                    // the engine's axis conventions turn out to be.
+                    scene->Position = this.holdPosition + this.sessionOffset;
+                    scene->LookAtVector = this.holdLookAt + this.sessionOffset;
+
+                    if (this.fovOverrideRadians is { } writeFov)
+                    {
+                        render->FoV = writeFov;
+                    }
+                }
+
+                // Reported regardless of who is reading. A tick read during a hold must not
+                // publish the game's own values: the add-on reprojects against what we
+                // report, and telling it the camera is somewhere other than where we are
+                // holding it is exactly the inconsistency the hold exists to avoid.
+                if (this.fovOverrideRadians is { } reportFov)
+                {
+                    fov = reportFov;
                 }
 
                 eye = this.holdEye + this.sessionOffset;

@@ -143,6 +143,13 @@ public sealed class Plugin : IDalamudPlugin
         this.camera!.EnsureHooked();
         this.connector!.TryConnect();
 
+        // Read the camera here as well as from the update hook. The hook is required to
+        // *write* during a stack, but nothing about reading needs it, and tying both to it
+        // meant that if it ever stopped firing the plugin reported no camera at all --
+        // green on both status lines, permanently "waiting for the game camera", and
+        // telling the add-on there was no camera tool.
+        this.camera.Refresh();
+
         // Availability follows the game state, but a running session is never torn down by
         // it. Tearing one down because the state blinked -- IsGPosing flickering, or a dev
         // reload -- is worse than useless: the add-on is not told, so it carries on
