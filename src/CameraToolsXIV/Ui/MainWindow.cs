@@ -113,7 +113,22 @@ internal sealed class MainWindow : Window
             var offset = this.session.LastOffset;
             ImGui.TextUnformatted($"step   {raw.X,9:F3} {raw.Y,9:F3}  (add-on units)");
             ImGui.TextUnformatted($"moved  {offset.Length(),9:F3}  world units");
+
+            // The only way out if an add-on dies mid-stack without ending its session.
+            if (ImGui.SmallButton("Release camera"))
+            {
+                this.session.Abort();
+            }
+
             return;
+        }
+
+        if (this.session.WasAborted)
+        {
+            ImGui.TextColored(Bad, "Last session was cut short.");
+            ImGui.TextWrapped(
+                "The add-on was not told and may still think it is stacking. Press CANCEL " +
+                "in its window and start again.");
         }
 
         // Availability is derived from the game state, not chosen by the user: arming has

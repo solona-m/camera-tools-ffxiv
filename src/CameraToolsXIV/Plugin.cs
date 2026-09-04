@@ -143,16 +143,18 @@ public sealed class Plugin : IDalamudPlugin
         this.camera!.EnsureHooked();
         this.connector!.TryConnect();
 
-        // Availability follows the game state directly. Abort first so that leaving Group
-        // Pose mid-stack tears the session down in order rather than pulling the camera
-        // out from under an add-on that still thinks it owns it.
-        var allowed = this.IsCameraAllowed();
-        if (!allowed && this.session!.Active)
+        // A running session is left strictly alone.
+        //
+        // Tearing one down because the game state blinked -- IsGPosing flickering, or a
+        // dev reload -- is worse than useless: the add-on is not told, so it carries on
+        // compositing frames against a camera that has silently stopped moving, and the
+        // result is a ghosted image that no amount of focus tuning can fix. A stack lasts
+        // seconds to minutes and the add-on owns the camera for the duration, so let it
+        // finish and release the camera itself.
+        if (!this.session!.Active)
         {
-            this.session.Abort();
+            this.camera.SetArmed(this.IsCameraAllowed() && this.camera.LastSnapshot.Valid);
         }
-
-        this.camera.SetArmed(allowed && this.camera.LastSnapshot.Valid);
 
         // Camera data is published from the camera update itself, not here, so that what
         // the add-on reads always describes the frame about to be rendered.

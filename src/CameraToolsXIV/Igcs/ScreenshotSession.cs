@@ -43,6 +43,7 @@ internal sealed class ScreenshotSession
     private readonly object gate = new();
 
     private bool active;
+    private bool wasAborted;
     private Vector2 lastRawStep;
     private Vector3 lastOffset;
 
@@ -56,6 +57,19 @@ internal sealed class ScreenshotSession
     public bool Active
     {
         get { lock (this.gate) { return this.active; } }
+    }
+
+    /// <summary>
+    /// Whether the last session ended by being cut short rather than by the add-on.
+    /// </summary>
+    /// <remarks>
+    /// Worth surfacing, because there is no way to tell the add-on. It goes on believing
+    /// it holds the camera, and the user sees a ghosted preview that looks like a focus
+    /// problem rather than an abandoned session.
+    /// </remarks>
+    public bool WasAborted
+    {
+        get { lock (this.gate) { return this.wasAborted; } }
     }
 
     /// <summary>The most recent step as the add-on sent it, before scaling.</summary>
@@ -92,6 +106,7 @@ internal sealed class ScreenshotSession
             }
 
             this.active = true;
+            this.wasAborted = false;
         }
 
         this.log.Information($"IGCS session started (type {type}).");
@@ -179,9 +194,14 @@ internal sealed class ScreenshotSession
     /// Abandons a session without waiting for the add-on to end it.
     /// </summary>
     /// <remarks>
-    /// Used on unload and when the camera stops being permitted. An add-on that crashes
-    /// or is disabled mid-stack never sends <c>IGCS_EndScreenshotSession</c>, and without
-    /// this the camera would stay frozen with no visible way to release it.
+    /// Reserved for unload and for an explicit request by the user. An add-on that
+    /// crashes or is disabled mid-stack never sends <c>IGCS_EndScreenshotSession</c>, so
+    /// without an escape the camera would stay frozen with no way to release it.
+    /// <para>
+    /// Deliberately not called for transient game-state changes. The add-on cannot be
+    /// told, so it keeps compositing against a camera that has stopped moving, and the
+    /// ghosted result looks like a focus problem rather than an abandoned session.
+    /// </para>
     /// </remarks>
     public void Abort()
     {
@@ -194,6 +214,7 @@ internal sealed class ScreenshotSession
 
             this.camera.ReleaseHold();
             this.active = false;
+            this.wasAborted = true;
         }
 
         this.log.Warning("IGCS session aborted.");
