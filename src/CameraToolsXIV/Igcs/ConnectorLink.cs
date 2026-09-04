@@ -43,14 +43,15 @@ internal sealed unsafe class ConnectorLink : IDisposable
     /// was allocated by that module's CRT, so if ReShade unloads the add-on -- which it
     /// can do at runtime, from its own add-on list -- the allocation dies with it and our
     /// pointer dangles. Holding a reference means the module stays mapped until we let go.
+    /// A connection is never recorded without one.
     /// </param>
-    private sealed record Connection(nint BaseAddress, string ModuleName, nint Buffer, nint PinnedHandle);
+    private sealed record Connection(string ModuleName, nint Buffer, nint PinnedHandle);
 
     private readonly IPluginLog log;
     private readonly Stopwatch sinceLastScan = Stopwatch.StartNew();
 
     /// <summary>
-    /// Guards <see cref="connections"/>.
+    /// Guards <see cref="connections"/> and <see cref="examined"/>.
     /// </summary>
     /// <remarks>
     /// Publishing runs on the game thread from the camera update hook, while disposal runs
@@ -61,13 +62,25 @@ internal sealed unsafe class ConnectorLink : IDisposable
     private readonly object gate = new();
 
     private readonly List<Connection> connections = [];
-    private readonly HashSet<nint> connectedModules = [];
+
+    /// <summary>
+    /// Modules already dealt with, whether they connected or refused.
+    /// </summary>
+    /// <remarks>
+    /// Refusals are remembered too. Scanning never stops, so without this a module that
+    /// exports the interface but declines would be called into and warned about on every
+    /// scan for the life of the session.
+    /// </remarks>
+    private readonly HashSet<nint> examined = [];
+
+    private nint[] moduleBuffer = new nint[1024];
 
     private volatile bool connected;
     private volatile string? connectedModule;
+    private volatile bool disposed;
     private bool layoutVerified;
     private bool layoutValid;
-    private bool disposed;
+    private bool enumerationFailureLogged;
 
     public ConnectorLink(IPluginLog log) => this.log = log;
 
@@ -91,52 +104,82 @@ internal sealed unsafe class ConnectorLink : IDisposable
             return;
         }
 
-        foreach (var module in EnumerateModules())
+        // Scanning touches foreign code and races with libraries loading and unloading, so
+        // it must not be able to throw into the framework update. A failed scan is not
+        // fatal; the next one will pick the add-on up.
+        try
         {
-            this.TryConnectModule(module);
+            var count = this.EnumerateModules();
+            for (var i = 0; i < count; i++)
+            {
+                this.TryConnectModule(this.moduleBuffer[i]);
+            }
+        }
+        catch (Exception ex)
+        {
+            this.log.Debug(ex, "Module scan for a camera tools connector failed.");
         }
     }
 
     /// <summary>
-    /// Enumerates loaded module handles.
+    /// Fills <see cref="moduleBuffer"/> with loaded module handles and returns the count.
     /// </summary>
     /// <remarks>
     /// Deliberately not <c>Process.Modules</c>: that materialises a ProcessModule per
     /// entry, each of which queries the file path and version info, and measured as a
     /// frame hitch of well over a hundred milliseconds in this process. This returns bare
-    /// handles, which is all the export lookup needs.
+    /// handles, which is all the export lookup needs. The buffer is reused across scans
+    /// because scanning continues for the life of the session.
     /// </remarks>
-    private static nint[] EnumerateModules()
+    private int EnumerateModules()
     {
-        var process = GetCurrentProcess();
-        var handles = new nint[1024];
-
         while (true)
         {
-            var sizeBytes = (uint)(handles.Length * IntPtr.Size);
-            if (!K32EnumProcessModules(process, handles, sizeBytes, out var needed))
+            var sizeBytes = (uint)(this.moduleBuffer.Length * IntPtr.Size);
+            if (!K32EnumProcessModules(GetCurrentProcess(), this.moduleBuffer, sizeBytes, out var needed))
             {
-                return [];
+                // A silent total failure here would look exactly like "no add-on
+                // installed" and send the user to check their ReShade setup instead.
+                if (!this.enumerationFailureLogged)
+                {
+                    this.enumerationFailureLogged = true;
+                    this.log.Error(
+                        $"EnumProcessModules failed (error {Marshal.GetLastWin32Error()}); " +
+                        "cannot find ReShade add-ons.");
+                }
+
+                return 0;
             }
 
             var count = (int)(needed / IntPtr.Size);
-            if (count <= handles.Length)
+            if (count <= this.moduleBuffer.Length)
             {
-                Array.Resize(ref handles, count);
-                return handles;
+                return count;
             }
 
-            handles = new nint[count];
+            this.moduleBuffer = new nint[count];
         }
     }
 
     private void TryConnectModule(nint handle)
     {
-        if (handle == nint.Zero || this.connectedModules.Contains(handle))
+        if (handle == nint.Zero)
         {
             return;
         }
 
+        lock (this.gate)
+        {
+            if (this.disposed || !this.examined.Add(handle))
+            {
+                return;
+            }
+        }
+
+        // Everything below runs outside the lock: it calls into the add-on, and holding a
+        // lock the per-frame publish path also takes while foreign code runs would stall
+        // the game thread. Only one thread ever scans, so claiming the handle above is
+        // enough to keep this from overlapping with itself.
         if (!NativeLibrary.TryGetExport(handle, ConnectExport, out var connectAddress) ||
             !NativeLibrary.TryGetExport(handle, BufferExport, out var bufferAddress))
         {
@@ -145,6 +188,15 @@ internal sealed unsafe class ConnectorLink : IDisposable
 
         var path = GetModulePath(handle);
         var name = path.Length == 0 ? $"0x{handle:X}" : System.IO.Path.GetFileName(path);
+
+        // Without a path we cannot take a reference, and without a reference the buffer
+        // can be freed under us while we are still writing to it every frame. Refuse the
+        // module rather than connect to one we cannot keep alive.
+        if (path.Length == 0)
+        {
+            this.log.Warning($"Could not resolve a path for module {name}; skipping it rather than risk a dangling buffer.");
+            return;
+        }
 
         // connectFromCameraTools returns a C++ bool, i.e. a single byte.
         var accepted = ((delegate* unmanaged[Cdecl]<byte>)connectAddress)();
@@ -161,36 +213,32 @@ internal sealed unsafe class ConnectorLink : IDisposable
             return;
         }
 
-        // Take a reference before keeping the pointer, so the module cannot be unloaded
-        // out from under the buffer we are about to write to every frame.
-        nint pinned = nint.Zero;
-        if (path.Length > 0)
+        nint pinned;
+        try
         {
-            try
-            {
-                pinned = NativeLibrary.Load(path);
-            }
-            catch (Exception ex)
-            {
-                this.log.Warning(ex, $"Could not pin {name}; skipping it rather than risk a dangling buffer.");
-                return;
-            }
+            pinned = NativeLibrary.Load(path);
+        }
+        catch (Exception ex)
+        {
+            this.log.Warning(ex, $"Could not pin {name}; skipping it rather than risk a dangling buffer.");
+            return;
+        }
+
+        if (pinned == nint.Zero)
+        {
+            this.log.Warning($"Pinning {name} returned no handle; skipping it rather than risk a dangling buffer.");
+            return;
         }
 
         lock (this.gate)
         {
             if (this.disposed)
             {
-                if (pinned != nint.Zero)
-                {
-                    NativeLibrary.Free(pinned);
-                }
-
+                NativeLibrary.Free(pinned);
                 return;
             }
 
-            this.connectedModules.Add(handle);
-            this.connections.Add(new Connection(handle, name, allocated, pinned));
+            this.connections.Add(new Connection(name, allocated, pinned));
             this.connectedModule = string.Join(", ", this.connections.ConvertAll(c => c.ModuleName));
             this.connected = true;
         }
@@ -262,6 +310,8 @@ internal sealed unsafe class ConnectorLink : IDisposable
 
     public void Dispose()
     {
+        List<nint> toFree;
+
         lock (this.gate)
         {
             if (this.disposed)
@@ -273,26 +323,52 @@ internal sealed unsafe class ConnectorLink : IDisposable
             this.connected = false;
             this.connectedModule = null;
 
-            // Inside the lock: a publish in flight on the game thread must finish before
-            // any module is released, or it writes into memory that has just been unmapped.
-            foreach (var connection in this.connections)
-            {
-                if (connection.PinnedHandle != nint.Zero)
-                {
-                    NativeLibrary.Free(connection.PinnedHandle);
-                }
-            }
-
+            // Collect the handles and drop the connections inside the lock, so a publish
+            // in flight on the game thread has finished before any buffer stops being
+            // written to and before any module is released.
+            toFree = this.connections.ConvertAll(c => c.PinnedHandle);
             this.connections.Clear();
-            this.connectedModules.Clear();
+            this.examined.Clear();
+        }
+
+        // Freeing happens outside the lock. FreeLibrary runs the module's detach path and
+        // takes the Windows loader lock; doing that while holding a lock the game thread
+        // takes every frame would stall it, and orders our lock before the loader lock.
+        foreach (var handle in toFree)
+        {
+            NativeLibrary.Free(handle);
         }
     }
 
+    /// <summary>Resolves a module's full path, growing the buffer until it fits.</summary>
+    /// <remarks>
+    /// GetModuleFileNameW returns the buffer size on truncation rather than failing, so a
+    /// fixed MAX_PATH buffer silently clips long paths -- which then surfaces as a
+    /// misleading "could not pin" for a path that was simply cut short.
+    /// </remarks>
     private static string GetModulePath(nint module)
     {
-        var buffer = new StringBuilder(260);
-        var length = GetModuleFileNameW(module, buffer, (uint)buffer.Capacity);
-        return length == 0 ? string.Empty : buffer.ToString(0, (int)length);
+        var capacity = 260;
+
+        while (capacity <= 32768)
+        {
+            var buffer = new StringBuilder(capacity);
+            var length = GetModuleFileNameW(module, buffer, (uint)capacity);
+
+            if (length == 0)
+            {
+                return string.Empty;
+            }
+
+            if (length < capacity)
+            {
+                return buffer.ToString(0, (int)length);
+            }
+
+            capacity *= 2;
+        }
+
+        return string.Empty;
     }
 
     [DllImport("kernel32.dll")]
