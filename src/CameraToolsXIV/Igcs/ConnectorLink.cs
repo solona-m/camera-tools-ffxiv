@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 using Dalamud.Plugin.Services;
 
 namespace CameraToolsXIV.Igcs;
@@ -22,8 +23,17 @@ internal sealed unsafe class ConnectorLink : IDisposable
     private const string ConnectExport = "connectFromCameraTools";
     private const string BufferExport = "getDataFromCameraToolsBuffer";
 
-    /// <summary>Add-ons load independently of us, so rescan until one appears.</summary>
-    private static readonly TimeSpan RescanInterval = TimeSpan.FromSeconds(2);
+    /// <summary>
+    /// How often to look for add-ons.
+    /// </summary>
+    /// <remarks>
+    /// Scanning never stops. ReShade loads its add-ons in its own order and can load them
+    /// after we start, so latching on the first success would connect to whichever add-on
+    /// happened to be up at that instant and silently ignore the rest -- non-deterministic
+    /// between launches. Rescanning is affordable because the scan below does not build
+    /// managed module objects.
+    /// </remarks>
+    private static readonly TimeSpan RescanInterval = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// One connected add-on.
@@ -34,32 +44,42 @@ internal sealed unsafe class ConnectorLink : IDisposable
     /// can do at runtime, from its own add-on list -- the allocation dies with it and our
     /// pointer dangles. Holding a reference means the module stays mapped until we let go.
     /// </param>
-    private sealed record Connection(string ModuleName, nint Buffer, nint PinnedHandle);
+    private sealed record Connection(nint BaseAddress, string ModuleName, nint Buffer, nint PinnedHandle);
 
     private readonly IPluginLog log;
     private readonly Stopwatch sinceLastScan = Stopwatch.StartNew();
-    private readonly List<Connection> connections = [];
 
-    private bool scanned;
+    /// <summary>
+    /// Guards <see cref="connections"/>.
+    /// </summary>
+    /// <remarks>
+    /// Publishing runs on the game thread from the camera update hook, while disposal runs
+    /// on Dalamud's unload thread. Without this, disposal can free a module and clear the
+    /// list while a publish is part-way through iterating it -- writing 84 bytes into a
+    /// module that has just been unmapped.
+    /// </remarks>
+    private readonly object gate = new();
+
+    private readonly List<Connection> connections = [];
+    private readonly HashSet<nint> connectedModules = [];
+
+    private volatile bool connected;
+    private volatile string? connectedModule;
     private bool layoutVerified;
     private bool layoutValid;
+    private bool disposed;
 
     public ConnectorLink(IPluginLog log) => this.log = log;
 
-    public bool Connected => this.connections.Count > 0;
+    public bool Connected => this.connected;
 
-    public string? ConnectedModule =>
-        this.connections.Count == 0 ? null : string.Join(", ", this.connections.ConvertAll(c => c.ModuleName));
+    /// <summary>Names of the connected add-ons, composed once per connection.</summary>
+    public string? ConnectedModule => this.connectedModule;
 
     /// <summary>Looks for connectable add-ons, rate-limited so it can be called every frame.</summary>
-    /// <remarks>
-    /// Scanning stops once anything is found. Enumerating every loaded module is expensive
-    /// enough to show up as a frame hitch, and add-ons are loaded by ReShade at startup, so
-    /// a single successful scan sees all of them.
-    /// </remarks>
     public void TryConnect()
     {
-        if (this.scanned || this.sinceLastScan.Elapsed < RescanInterval)
+        if (this.disposed || this.sinceLastScan.Elapsed < RescanInterval)
         {
             return;
         }
@@ -71,68 +91,111 @@ internal sealed unsafe class ConnectorLink : IDisposable
             return;
         }
 
-        try
+        foreach (var module in EnumerateModules())
         {
-            using var process = Process.GetCurrentProcess();
-            foreach (ProcessModule module in process.Modules)
-            {
-                this.TryConnectModule(module);
-            }
-        }
-        catch (Exception ex)
-        {
-            // Module enumeration races with libraries loading and unloading; a failed scan
-            // is not fatal, the next one will pick the add-on up.
-            this.log.Debug(ex, "Module scan for a camera tools connector failed.");
-            return;
-        }
-
-        if (this.connections.Count > 0)
-        {
-            this.scanned = true;
+            this.TryConnectModule(module);
         }
     }
 
-    private void TryConnectModule(ProcessModule module)
+    /// <summary>
+    /// Enumerates loaded module handles.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not <c>Process.Modules</c>: that materialises a ProcessModule per
+    /// entry, each of which queries the file path and version info, and measured as a
+    /// frame hitch of well over a hundred milliseconds in this process. This returns bare
+    /// handles, which is all the export lookup needs.
+    /// </remarks>
+    private static nint[] EnumerateModules()
     {
-        var handle = module.BaseAddress;
-        if (handle == nint.Zero ||
-            !NativeLibrary.TryGetExport(handle, ConnectExport, out var connectAddress) ||
+        var process = GetCurrentProcess();
+        var handles = new nint[1024];
+
+        while (true)
+        {
+            var sizeBytes = (uint)(handles.Length * IntPtr.Size);
+            if (!K32EnumProcessModules(process, handles, sizeBytes, out var needed))
+            {
+                return [];
+            }
+
+            var count = (int)(needed / IntPtr.Size);
+            if (count <= handles.Length)
+            {
+                Array.Resize(ref handles, count);
+                return handles;
+            }
+
+            handles = new nint[count];
+        }
+    }
+
+    private void TryConnectModule(nint handle)
+    {
+        if (handle == nint.Zero || this.connectedModules.Contains(handle))
+        {
+            return;
+        }
+
+        if (!NativeLibrary.TryGetExport(handle, ConnectExport, out var connectAddress) ||
             !NativeLibrary.TryGetExport(handle, BufferExport, out var bufferAddress))
         {
             return;
         }
 
+        var path = GetModulePath(handle);
+        var name = path.Length == 0 ? $"0x{handle:X}" : System.IO.Path.GetFileName(path);
+
         // connectFromCameraTools returns a C++ bool, i.e. a single byte.
-        var connected = ((delegate* unmanaged[Cdecl]<byte>)connectAddress)();
-        if (connected == 0)
+        var accepted = ((delegate* unmanaged[Cdecl]<byte>)connectAddress)();
+        if (accepted == 0)
         {
-            this.log.Warning($"{module.ModuleName} refused the camera tools connection.");
+            this.log.Warning($"{name} refused the camera tools connection.");
             return;
         }
 
         var allocated = ((delegate* unmanaged[Cdecl]<nint>)bufferAddress)();
         if (allocated == nint.Zero)
         {
-            this.log.Warning($"{module.ModuleName} returned a null camera tools buffer.");
+            this.log.Warning($"{name} returned a null camera tools buffer.");
             return;
         }
 
         // Take a reference before keeping the pointer, so the module cannot be unloaded
         // out from under the buffer we are about to write to every frame.
         nint pinned = nint.Zero;
-        try
+        if (path.Length > 0)
         {
-            pinned = NativeLibrary.Load(module.FileName);
-        }
-        catch (Exception ex)
-        {
-            this.log.Warning(ex, $"Could not pin {module.ModuleName}; skipping it rather than risk a dangling buffer.");
-            return;
+            try
+            {
+                pinned = NativeLibrary.Load(path);
+            }
+            catch (Exception ex)
+            {
+                this.log.Warning(ex, $"Could not pin {name}; skipping it rather than risk a dangling buffer.");
+                return;
+            }
         }
 
-        this.connections.Add(new Connection(module.ModuleName, allocated, pinned));
-        this.log.Information($"Connected to ReShade add-on {module.ModuleName}.");
+        lock (this.gate)
+        {
+            if (this.disposed)
+            {
+                if (pinned != nint.Zero)
+                {
+                    NativeLibrary.Free(pinned);
+                }
+
+                return;
+            }
+
+            this.connectedModules.Add(handle);
+            this.connections.Add(new Connection(handle, name, allocated, pinned));
+            this.connectedModule = string.Join(", ", this.connections.ConvertAll(c => c.ModuleName));
+            this.connected = true;
+        }
+
+        this.log.Information($"Connected to ReShade add-on {name}.");
     }
 
     /// <summary>
@@ -168,9 +231,12 @@ internal sealed unsafe class ConnectorLink : IDisposable
     /// <summary>Writes the current camera state into every connected add-on's buffer.</summary>
     public void Publish(in CameraToolsData data)
     {
-        foreach (var connection in this.connections)
+        lock (this.gate)
         {
-            *(CameraToolsData*)connection.Buffer = data;
+            foreach (var connection in this.connections)
+            {
+                *(CameraToolsData*)connection.Buffer = data;
+            }
         }
     }
 
@@ -185,22 +251,57 @@ internal sealed unsafe class ConnectorLink : IDisposable
     public void PublishDisabled()
     {
         var cleared = default(CameraToolsData);
-        foreach (var connection in this.connections)
+        lock (this.gate)
         {
-            *(CameraToolsData*)connection.Buffer = cleared;
+            foreach (var connection in this.connections)
+            {
+                *(CameraToolsData*)connection.Buffer = cleared;
+            }
         }
     }
 
     public void Dispose()
     {
-        foreach (var connection in this.connections)
+        lock (this.gate)
         {
-            if (connection.PinnedHandle != nint.Zero)
+            if (this.disposed)
             {
-                NativeLibrary.Free(connection.PinnedHandle);
+                return;
             }
-        }
 
-        this.connections.Clear();
+            this.disposed = true;
+            this.connected = false;
+            this.connectedModule = null;
+
+            // Inside the lock: a publish in flight on the game thread must finish before
+            // any module is released, or it writes into memory that has just been unmapped.
+            foreach (var connection in this.connections)
+            {
+                if (connection.PinnedHandle != nint.Zero)
+                {
+                    NativeLibrary.Free(connection.PinnedHandle);
+                }
+            }
+
+            this.connections.Clear();
+            this.connectedModules.Clear();
+        }
     }
+
+    private static string GetModulePath(nint module)
+    {
+        var buffer = new StringBuilder(260);
+        var length = GetModuleFileNameW(module, buffer, (uint)buffer.Capacity);
+        return length == 0 ? string.Empty : buffer.ToString(0, (int)length);
+    }
+
+    [DllImport("kernel32.dll")]
+    private static extern nint GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool K32EnumProcessModules(nint hProcess, [Out] nint[] lphModule, uint cb, out uint lpcbNeeded);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetModuleFileNameW(nint hModule, StringBuilder lpFilename, uint nSize);
 }

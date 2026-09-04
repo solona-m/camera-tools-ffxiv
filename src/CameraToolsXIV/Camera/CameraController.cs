@@ -102,7 +102,11 @@ internal sealed unsafe class CameraController : IDisposable
     private Vector3 rawLookAt;
 
     private CameraSnapshot lastSnapshot = CameraSnapshot.Invalid;
-    private long lastUpdateMs = long.MinValue;
+
+    // Zero, not long.MinValue: Environment.TickCount64 minus long.MinValue overflows to a
+    // negative value, which would read as "fresh" and invert the guard. Zero makes an
+    // un-stamped snapshot stale, which is the safe direction.
+    private long lastUpdateMs;
 
     /// <summary>
     /// How long a snapshot stays usable without the camera update refreshing it.
@@ -229,6 +233,8 @@ internal sealed unsafe class CameraController : IDisposable
     /// </remarks>
     public bool BeginHold()
     {
+        float divergence;
+
         lock (this.gate)
         {
             var snapshot = this.SnapshotLocked();
@@ -245,20 +251,26 @@ internal sealed unsafe class CameraController : IDisposable
             // We write scene->Position but publish the view matrix's eye point, which is
             // only sound while the two translate together. They are identical in FFXIV,
             // and a divergence would silently misreport where the camera is -- presenting
-            // as depth of field that cannot be focused -- so say so rather than guess.
-            var divergence = Vector3.Distance(this.holdEye, this.holdPosition);
-            if (divergence > 0.01f)
-            {
-                this.log.Warning(
-                    $"Camera eye and scene position differ by {divergence:F3} units; " +
-                    "published position may not match the rendered camera.");
-            }
+            // as depth of field that cannot be focused -- so measure it here and report it
+            // once the locks are released.
+            divergence = Vector3.Distance(this.holdEye, this.holdPosition);
 
             this.sessionOffset = Vector3.Zero;
             this.fovOverrideRadians = null;
             this.holding = true;
-            return true;
         }
+
+        // Outside both locks. This runs on ReShade's render thread with the session lock
+        // also held, and the log sink writes to disk -- doing that under the camera lock
+        // would stall the game thread's camera update behind a file write.
+        if (divergence > 0.01f)
+        {
+            this.log.Warning(
+                $"Camera eye and scene position differ by {divergence:F3} units; " +
+                "published position may not match the rendered camera.");
+        }
+
+        return true;
     }
 
     public void ReleaseHold()
