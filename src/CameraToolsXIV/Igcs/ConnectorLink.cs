@@ -168,6 +168,17 @@ internal sealed unsafe class ConnectorLink : IDisposable
             return;
         }
 
+        // Candidacy is tested before the handle is remembered, so only modules that
+        // actually implement the interface enter the cache. Caching every enumerated
+        // module would mean that when Windows reuses the base address of some unrelated
+        // DLL that has since unloaded, a real add-on mapped there is skipped forever --
+        // silently, because a negative cache has nothing to report.
+        if (!NativeLibrary.TryGetExport(handle, ConnectExport, out var connectAddress) ||
+            !NativeLibrary.TryGetExport(handle, BufferExport, out var bufferAddress))
+        {
+            return;
+        }
+
         lock (this.gate)
         {
             if (this.disposed || !this.examined.Add(handle))
@@ -180,12 +191,6 @@ internal sealed unsafe class ConnectorLink : IDisposable
         // lock the per-frame publish path also takes while foreign code runs would stall
         // the game thread. Only one thread ever scans, so claiming the handle above is
         // enough to keep this from overlapping with itself.
-        if (!NativeLibrary.TryGetExport(handle, ConnectExport, out var connectAddress) ||
-            !NativeLibrary.TryGetExport(handle, BufferExport, out var bufferAddress))
-        {
-            return;
-        }
-
         var path = GetModulePath(handle);
         var name = path.Length == 0 ? $"0x{handle:X}" : System.IO.Path.GetFileName(path);
 
@@ -198,21 +203,14 @@ internal sealed unsafe class ConnectorLink : IDisposable
             return;
         }
 
-        // connectFromCameraTools returns a C++ bool, i.e. a single byte.
-        var accepted = ((delegate* unmanaged[Cdecl]<byte>)connectAddress)();
-        if (accepted == 0)
-        {
-            this.log.Warning($"{name} refused the camera tools connection.");
-            return;
-        }
-
-        var allocated = ((delegate* unmanaged[Cdecl]<nint>)bufferAddress)();
-        if (allocated == nint.Zero)
-        {
-            this.log.Warning($"{name} returned a null camera tools buffer.");
-            return;
-        }
-
+        // Pin before calling in, not after.
+        //
+        // The buffer we are about to ask for belongs to this module's heap, so nothing may
+        // happen between obtaining it and holding a reference. Pinning afterwards leaves a
+        // window in which the add-on unloads, the buffer is freed, and LoadLibrary then
+        // maps a *fresh* copy of the DLL with a new buffer of its own -- leaving us
+        // pairing a stale pointer with a valid-looking pin, which disguises the dangling
+        // write rather than preventing it.
         nint pinned;
         try
         {
@@ -230,20 +228,60 @@ internal sealed unsafe class ConnectorLink : IDisposable
             return;
         }
 
-        lock (this.gate)
+        var keep = false;
+        try
         {
-            if (this.disposed)
+            // LoadLibrary returns the existing handle for an already-mapped module, so a
+            // different one means the module was swapped underneath us and the exports
+            // resolved above belong to an instance that may be gone. The replacement has
+            // its own handle, which is not in the cache, so the next scan will pick it up.
+            if (pinned != handle)
             {
-                NativeLibrary.Free(pinned);
+                this.log.Warning($"{name} was reloaded while connecting; retrying on the next scan.");
                 return;
             }
 
-            this.connections.Add(new Connection(name, allocated, pinned));
-            this.connectedModule = string.Join(", ", this.connections.ConvertAll(c => c.ModuleName));
-            this.connected = true;
-        }
+            // connectFromCameraTools returns a C++ bool, i.e. a single byte.
+            var accepted = ((delegate* unmanaged[Cdecl]<byte>)connectAddress)();
+            if (accepted == 0)
+            {
+                this.log.Warning($"{name} refused the camera tools connection.");
+                return;
+            }
 
-        this.log.Information($"Connected to ReShade add-on {name}.");
+            var allocated = ((delegate* unmanaged[Cdecl]<nint>)bufferAddress)();
+            if (allocated == nint.Zero)
+            {
+                this.log.Warning($"{name} returned a null camera tools buffer.");
+                return;
+            }
+
+            lock (this.gate)
+            {
+                if (this.disposed)
+                {
+                    return;
+                }
+
+                this.connections.Add(new Connection(name, allocated, pinned));
+                this.connectedModule = string.Join(", ", this.connections.ConvertAll(c => c.ModuleName));
+                this.connected = true;
+                keep = true;
+            }
+
+            this.log.Information($"Connected to ReShade add-on {name}.");
+        }
+        finally
+        {
+            // Pinning first means every path that does not end in a stored connection has
+            // to hand the reference back, or the module stays mapped for the life of the
+            // process. A finally covers the early returns and anything thrown by the
+            // add-on's own entry points.
+            if (!keep)
+            {
+                NativeLibrary.Free(pinned);
+            }
+        }
     }
 
     /// <summary>
