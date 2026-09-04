@@ -73,6 +73,12 @@ internal sealed unsafe class IgcsBridge : IDisposable
 
     public IgcsBridge(IPluginLog log) => this.log = log;
 
+    /// <summary>
+    /// Whether the shim is loaded <b>and</b> our callbacks are registered with it. A shim
+    /// that mapped but would not accept a registration does not count as loaded: it cannot
+    /// serve an add-on, so reporting it as working would be a lie in the one place someone
+    /// looks to find out.
+    /// </summary>
     public bool Loaded => this.module != nint.Zero;
 
     public string? LoadError { get; private set; }
@@ -245,9 +251,26 @@ internal sealed unsafe class IgcsBridge : IDisposable
         }
     }
 
+    /// <summary>
+    /// Records why loading failed and makes sure <see cref="Loaded"/> reports it.
+    /// </summary>
+    /// <remarks>
+    /// Clearing the handle here rather than at each call site is deliberate. The module is
+    /// assigned before registration is attempted, so a failure after that point would
+    /// otherwise leave Loaded true: the window would show "IGCS exports active" in green,
+    /// the branch that displays LoadError would be unreachable, and the plugin would look
+    /// perfectly healthy while no callbacks had been registered at all. That is exactly the
+    /// green-but-inert failure this status line exists to rule out.
+    /// <para>
+    /// A module we mapped stays mapped — add-ons cache pointers into it — so forgetting the
+    /// handle is not a leak of anything reclaimable, and a later attempt finds it again
+    /// through <see cref="FindLoadedShim"/>.
+    /// </para>
+    /// </remarks>
     private void Fail(string message)
     {
         this.LoadError = message;
+        this.module = nint.Zero;
         this.log.Error(message);
     }
 
