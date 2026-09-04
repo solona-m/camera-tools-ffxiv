@@ -1,0 +1,130 @@
+name: Testing release
+
+on:
+  push:
+    tags:
+      - 'testing-*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      # fetch-depth: 0 is required — the version counts commits on HEAD.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Dalamud
+        shell: pwsh
+        run: |
+          Invoke-WebRequest 'https://goatcorp.github.io/dalamud-distrib/stg/latest.zip' -OutFile dalamud.zip
+          Expand-Archive dalamud.zip -DestinationPath dalamud_dist
+          "DALAMUD_HOME=$env:GITHUB_WORKSPACE\dalamud_dist" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+
+      # Tolerant of a lightweight tag, unlike the stable workflow: testing builds go out often and
+      # frequently have nothing worth saying. The re-fetch is still required — actions/checkout
+      # flattens annotated tags, so without it even a properly annotated tag reads as lightweight.
+      - name: Read the changelog from the tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          git fetch --force --tags origin
+          $changelog = ''
+          if ((git cat-file -t $tag) -eq 'tag') {
+            $changelog = ((git tag -l --format='%(contents)' $tag) -join "`n").Trim()
+          } else {
+            Write-Host "::notice::$tag is a lightweight tag - building without a changelog."
+          }
+          "Changelog<<CHANGELOG_EOF" | Out-File -Append $env:GITHUB_ENV
+          $changelog | Out-File -Append $env:GITHUB_ENV
+          "CHANGELOG_EOF" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Build
+        shell: pwsh
+        run: ./build/build.ps1 -Configuration Release
+
+      # No tag/version assertion here. Testing tags are named for a build number rather than the
+      # version, so they are not expected to agree.
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content "src\CameraToolsXIV\bin\Release\CameraToolsXIV.json" | ConvertFrom-Json
+          "version=$($manifest.AssemblyVersion)" | Out-File -Append $env:GITHUB_OUTPUT
+
+      - name: Package
+        shell: pwsh
+        run: Copy-Item "src\CameraToolsXIV\bin\Release\CameraToolsXIV\latest.zip" -Destination latest.zip
+
+      - name: Guard the package size
+        shell: pwsh
+        run: |
+          $maxBytes = 2MB
+          $size = (Get-Item latest.zip).Length
+          Write-Host "latest.zip is $([math]::Round($size/1KB, 1)) KB"
+          if ($size -gt $maxBytes) {
+            $big = (Get-ChildItem "src\CameraToolsXIV\bin\Release" -Recurse -File |
+                    Sort-Object Length -Descending | Select-Object -First 10 |
+                    ForEach-Object { "  {0,10:N0}  {1}" -f $_.Length, $_.FullName }) -join "`n"
+            Write-Error "latest.zip is $([math]::Round($size/1MB, 2)) MB, over the $([math]::Round($maxBytes/1MB)) MB budget. Largest files in the build output:`n$big"
+            exit 1
+          }
+
+      - name: Verify the shim is in the package
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path latest.zip))
+          $names = $zip.Entries.FullName
+          $zip.Dispose()
+          Write-Host "latest.zip contains: $($names -join ', ')"
+          if ($names -notcontains 'IgcsBridge.dll') {
+            throw "IgcsBridge.dll is missing from latest.zip. Without it the plugin cannot expose the IGCS exports and no add-on will ever find it."
+          }
+
+      # prerelease: true is deliberate, and load-bearing for the sync in the plugins repo: it is how
+      # the newest stable and the newest testing build are told apart, and it keeps /releases/latest
+      # resolving to the last stable build.
+      - name: Create prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          files: latest.zip
+          prerelease: true
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify plugins repo
+        shell: pwsh
+        env:
+          PLUGINS_REPO_TOKEN: ${{ secrets.PLUGINS_REPO_TOKEN }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:PLUGINS_REPO_TOKEN"
+            Accept        = "application/vnd.github+json"
+          }
+          $body = @{
+            event_type     = "plugin-released"
+            client_payload = @{
+              plugin  = "CameraToolsXIV"
+              version = "${{ steps.version.outputs.version }}"
+              testing = $true
+            }
+          } | ConvertTo-Json
+
+          Invoke-RestMethod -Method Post `
+            -Uri "https://api.github.com/repos/solona-m/plugins/dispatches" `
+            -Headers $headers `
+            -Body $body `
+            -ContentType "application/json"

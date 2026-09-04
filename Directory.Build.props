@@ -1,0 +1,33 @@
+<Project>
+  <PropertyGroup>
+    <DALAMUD_HOME Condition="'$(DALAMUD_HOME)' == '' AND Exists('$(AppData)\XIVLauncherCN\addon\Hooks\dev')">$(AppData)\XIVLauncherCN\addon\Hooks\dev</DALAMUD_HOME>
+    <DALAMUD_HOME Condition="'$(DALAMUD_HOME)' == ''">$(AppData)\XIVLauncher\addon\Hooks\dev</DALAMUD_HOME>
+    <DalamudLibPath>$(DALAMUD_HOME)\</DalamudLibPath>
+  </PropertyGroup>
+
+  <!--
+    Version is derived, never hand-written: yyMM.<commits on HEAD>. The release tag does not set it —
+    the workflow reads the built manifest and asserts the tag agrees, so a mistyped tag fails before
+    a release exists rather than shipping under a misleading name.
+
+    This requires full history. A shallow clone counts only the commits it fetched, so every CI
+    checkout must use fetch-depth: 0 or the version silently goes backwards.
+  -->
+  <Target Name="ComputeCameraToolsVersion" BeforeTargets="GetAssemblyVersion;GenerateNuspec;Build" Condition="'$(CameraToolsVersion)' == ''">
+    <Exec Command="git rev-list --count HEAD" ConsoleToMsBuild="true" StandardOutputImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="GitCommitCount" />
+    </Exec>
+    <CreateProperty Value="$([System.DateTime]::UtcNow.ToString('yyMM')).$(GitCommitCount)">
+      <Output TaskParameter="Value" PropertyName="CameraToolsVersion" />
+    </CreateProperty>
+    <CreateProperty Value="$(CameraToolsVersion)">
+      <Output TaskParameter="Value" PropertyName="Version" />
+    </CreateProperty>
+    <CreateProperty Value="$(CameraToolsVersion)">
+      <Output TaskParameter="Value" PropertyName="AssemblyVersion" />
+    </CreateProperty>
+    <CreateProperty Value="$(CameraToolsVersion)">
+      <Output TaskParameter="Value" PropertyName="FileVersion" />
+    </CreateProperty>
+  </Target>
+</Project>

@@ -1,0 +1,156 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      # fetch-depth: 0 is required, not tidiness. The version is yyMM.<git rev-list --count HEAD>,
+      # and a shallow clone counts only the commits it fetched, so the version would silently go
+      # backwards on every release.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Dalamud
+        shell: pwsh
+        run: |
+          Invoke-WebRequest 'https://goatcorp.github.io/dalamud-distrib/stg/latest.zip' -OutFile dalamud.zip
+          Expand-Archive dalamud.zip -DestinationPath dalamud_dist
+          "DALAMUD_HOME=$env:GITHUB_WORKSPACE\dalamud_dist" | Out-File -Append $env:GITHUB_ENV
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.x'
+
+      # The manifest's Changelog comes from the annotated tag's message, passed to MSBuild as an
+      # environment variable. It cannot come from the GitHub release body — that release is created
+      # further down this job, long after the build.
+      #
+      # The tag type is asserted because a lightweight tag carries no message and %(contents) falls
+      # through to the tagged COMMIT's message, which would ship a random commit subject to every
+      # user as the changelog. The re-fetch is load-bearing: actions/checkout maps the tag's commit
+      # straight onto refs/tags/<name> and passes --no-tags, so every annotated tag arrives here
+      # flattened to a lightweight one. --force is required because the name is already taken.
+      - name: Read the changelog from the tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          git fetch --force --tags origin
+          if ((git cat-file -t $tag) -ne 'tag') {
+            throw "$tag is a lightweight tag and carries no changelog. Re-tag it with: git tag -a $tag -F notes.md"
+          }
+          $changelog = ((git tag -l --format='%(contents)' $tag) -join "`n").Trim()
+          "Changelog<<CHANGELOG_EOF" | Out-File -Append $env:GITHUB_ENV
+          $changelog | Out-File -Append $env:GITHUB_ENV
+          "CHANGELOG_EOF" | Out-File -Append $env:GITHUB_ENV
+
+      # build.ps1 builds the native IGCS shim, then the plugin, then runs the ABI harness. The
+      # harness is the reason this is a real gate rather than a compile check: it exercises the
+      # add-on boundary — export discovery by module scan, argument marshalling, and that
+      # unregistering makes the exports inert — none of which the compiler can catch.
+      #
+      # The toolset is detected rather than pinned: this repo is developed against VS 18 (v145) and
+      # the runner ships VS 2022 (v143).
+      - name: Build
+        shell: pwsh
+        run: ./build/build.ps1 -Configuration Release
+
+      # The tag does not set the version — Directory.Build.props does. The manifest is the only
+      # source of truth, so the tag is asserted against it and a mismatch fails here, before the
+      # release exists, rather than publishing under a misleading name.
+      - name: Read version
+        id: version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content "src\CameraToolsXIV\bin\Release\CameraToolsXIV.json" | ConvertFrom-Json
+          $version = $manifest.AssemblyVersion
+          $tag = "${{ github.ref_name }}"
+          if ($tag -ne "v$version") {
+            throw "$tag does not match the built version $version. Delete the tag and re-tag with: git tag -a v$version -F notes.md"
+          }
+          "version=$version" | Out-File -Append $env:GITHUB_OUTPUT
+
+      # Ship the package the Dalamud SDK already built, not a re-zip of the build output — that
+      # would nest a second copy of everything inside the download.
+      - name: Package
+        shell: pwsh
+        run: Copy-Item "src\CameraToolsXIV\bin\Release\CameraToolsXIV\latest.zip" -Destination latest.zip
+
+      # Dalamud re-downloads this zip for every user on every update. The plugin is a managed
+      # assembly plus a small native shim and has no business growing past a megabyte, so anything
+      # that sneaks into the build output should fail here rather than quietly cost everyone
+      # bandwidth.
+      - name: Guard the package size
+        shell: pwsh
+        run: |
+          $maxBytes = 2MB
+          $size = (Get-Item latest.zip).Length
+          Write-Host "latest.zip is $([math]::Round($size/1KB, 1)) KB"
+          if ($size -gt $maxBytes) {
+            $big = (Get-ChildItem "src\CameraToolsXIV\bin\Release" -Recurse -File |
+                    Sort-Object Length -Descending | Select-Object -First 10 |
+                    ForEach-Object { "  {0,10:N0}  {1}" -f $_.Length, $_.FullName }) -join "`n"
+            Write-Error "latest.zip is $([math]::Round($size/1MB, 2)) MB, over the $([math]::Round($maxBytes/1MB)) MB budget. Largest files in the build output:`n$big"
+            exit 1
+          }
+
+      # Assert the native shim actually shipped. The csproj includes it only if it exists on disk,
+      # so a native build that silently produced nothing would yield a plugin that loads, finds no
+      # IgcsBridge.dll, and simply never connects to any ReShade add-on.
+      - name: Verify the shim is in the package
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path latest.zip))
+          $names = $zip.Entries.FullName
+          $zip.Dispose()
+          Write-Host "latest.zip contains: $($names -join ', ')"
+          if ($names -notcontains 'IgcsBridge.dll') {
+            throw "IgcsBridge.dll is missing from latest.zip. Without it the plugin cannot expose the IGCS exports and no add-on will ever find it."
+          }
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: latest.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # GITHUB_TOKEN cannot reach another repository, so this needs a PAT with dispatch rights on
+      # solona-m/plugins. The sync there also runs on a nightly cron, so a failure here delays the
+      # listing rather than losing it.
+      - name: Notify plugins repo
+        shell: pwsh
+        env:
+          PLUGINS_REPO_TOKEN: ${{ secrets.PLUGINS_REPO_TOKEN }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:PLUGINS_REPO_TOKEN"
+            Accept        = "application/vnd.github+json"
+          }
+          $body = @{
+            event_type     = "plugin-released"
+            client_payload = @{
+              plugin  = "CameraToolsXIV"
+              version = "${{ steps.version.outputs.version }}"
+            }
+          } | ConvertTo-Json
+
+          Invoke-RestMethod -Method Post `
+            -Uri "https://api.github.com/repos/solona-m/plugins/dispatches" `
+            -Headers $headers `
+            -Body $body `
+            -ContentType "application/json"

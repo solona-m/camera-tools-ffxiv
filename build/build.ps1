@@ -13,6 +13,11 @@
 .PARAMETER SkipTests
     Skip the IGCS ABI harness. The harness verifies the add-on boundary without needing
     the game, so there is rarely a good reason to skip it.
+
+.PARAMETER PlatformToolset
+    MSVC toolset for the native shim. Detected from the installed Visual Studio when
+    omitted, which is what lets the same script build on a developer machine and on a CI
+    runner with a different Visual Studio.
 #>
 [CmdletBinding()]
 param(
@@ -21,7 +26,9 @@ param(
 
     [switch]$Deploy,
 
-    [switch]$SkipTests
+    [switch]$SkipTests,
+
+    [string]$PlatformToolset
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,7 +37,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $nativeProject = Join-Path $root 'src\native\IgcsBridge\IgcsBridge.vcxproj'
 $pluginProject = Join-Path $root 'src\CameraToolsXIV\CameraToolsXIV.csproj'
 
-function Find-MSBuild {
+function Find-VisualStudio {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (-not (Test-Path $vswhere)) {
         throw "vswhere.exe not found. Install Visual Studio Build Tools with the C++ workload."
@@ -49,12 +56,39 @@ function Find-MSBuild {
         throw "MSBuild.exe not found under $installPath."
     }
 
-    return $msbuild
+    return [pscustomobject]@{ MSBuild = $msbuild; InstallPath = $installPath }
+}
+
+# The vcxproj pins a toolset because MSBuild's own default resolves to v100 and fails, but a pinned
+# one is only correct on the machine it was pinned for: this repo is developed against VS 18 (v145)
+# while GitHub's windows-latest runners ship VS 2022 (v143). Ask the installation which toolsets it
+# actually has and take the newest, so the same script builds in both places.
+function Find-PlatformToolset {
+    param([string]$InstallPath)
+
+    $toolsets = Get-ChildItem -Path (Join-Path $InstallPath 'MSBuild\Microsoft\VC') -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName 'Platforms\x64\PlatformToolsets' } |
+        Where-Object { Test-Path $_ } |
+        Get-ChildItem -Directory |
+        Select-Object -ExpandProperty Name |
+        Where-Object { $_ -match '^v\d+$' } |
+        Sort-Object { [int]$_.Substring(1) } -Descending
+
+    if (-not $toolsets) {
+        throw "No x64 platform toolset found under $InstallPath. Install the C++ build tools."
+    }
+
+    return @($toolsets)[0]
 }
 
 Write-Host "==> Building IgcsBridge ($Configuration)" -ForegroundColor Cyan
-$msbuild = Find-MSBuild
-& $msbuild $nativeProject /p:Configuration=$Configuration /p:Platform=x64 /v:minimal /nologo
+$vs = Find-VisualStudio
+if (-not $PlatformToolset) {
+    $PlatformToolset = Find-PlatformToolset -InstallPath $vs.InstallPath
+}
+Write-Host "Using platform toolset $PlatformToolset"
+
+& $vs.MSBuild $nativeProject /p:Configuration=$Configuration /p:Platform=x64 /p:PlatformToolset=$PlatformToolset /v:minimal /nologo
 if ($LASTEXITCODE -ne 0) { throw "Native build failed." }
 
 Write-Host "==> Building CameraToolsXIV ($Configuration)" -ForegroundColor Cyan

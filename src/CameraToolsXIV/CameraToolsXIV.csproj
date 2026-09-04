@@ -1,7 +1,11 @@
 <Project Sdk="Dalamud.NET.Sdk/15.0.0">
 
   <PropertyGroup>
-    <Version>0.1.0.0</Version>
+    <!-- Version comes from Directory.Build.props as yyMM.<commit count>. -->
+    <!-- Set by the release workflow from the annotated tag's message, so the shipped manifest
+         carries the changelog. It cannot come from the GitHub release body: that release is created
+         after the build. Empty for local builds. -->
+    <Changelog Condition="'$(Changelog)' == ''"></Changelog>
     <Authors>Solona</Authors>
     <Company />
     <Description>Free camera for FFXIV that presents itself to ReShade as an IGCS camera tool, enabling iMMERSE Parallax DoF and IGCS DoF.</Description>
