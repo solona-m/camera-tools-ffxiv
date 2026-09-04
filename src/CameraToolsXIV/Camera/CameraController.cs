@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Numerics;
 using Dalamud.Hooking;
 using Dalamud.Plugin.Services;
@@ -52,7 +53,13 @@ internal sealed unsafe class CameraController : IDisposable
     private readonly object gate = new();
 
     private Hook<CameraUpdateDelegate>? updateHook;
-    private bool hookFailed;
+    private bool hookAbandoned;
+    private bool waitingLogged;
+
+    // The game's code section, used to sanity-check addresses read out of the camera's
+    // vtable before handing them to the hooking library.
+    private readonly nint moduleStart;
+    private readonly nint moduleEnd;
 
     // Guarded by `gate`. Sessions run on ReShade's render thread while the hook runs on
     // the game thread, so every one of these crosses a thread boundary.
@@ -69,7 +76,25 @@ internal sealed unsafe class CameraController : IDisposable
     {
         this.interop = interop;
         this.log = log;
+
+        try
+        {
+            using var process = Process.GetCurrentProcess();
+            var main = process.MainModule!;
+            this.moduleStart = main.BaseAddress;
+            this.moduleEnd = main.BaseAddress + main.ModuleMemorySize;
+        }
+        catch (Exception ex)
+        {
+            // Without the range we cannot validate, so fall back to attempting the hook
+            // and letting it fail loudly rather than silently never hooking.
+            this.log.Warning(ex, "Could not determine the game module range; hook address validation is disabled.");
+        }
     }
+
+    /// <summary>Whether an address plausibly points at game code.</summary>
+    private bool IsGameCode(nint address)
+        => this.moduleEnd == 0 || (address >= this.moduleStart && address < this.moduleEnd);
 
     /// <summary>The camera as the game last rendered it, refreshed every update.</summary>
     public CameraSnapshot LastSnapshot
@@ -195,7 +220,7 @@ internal sealed unsafe class CameraController : IDisposable
     /// </summary>
     public void EnsureHooked()
     {
-        if (this.updateHook is not null || this.hookFailed)
+        if (this.updateHook is not null || this.hookAbandoned)
         {
             return;
         }
@@ -206,20 +231,49 @@ internal sealed unsafe class CameraController : IDisposable
             return;
         }
 
+        // A camera object exists well before it is usable -- at the title screen and
+        // during zone loads its vtable pointer is not yet a real one. Hooking whatever
+        // happens to be there hands the hooking library an address nowhere near the
+        // game's code, and it fails trying to place a trampoline within reach of it.
+        // Validate first and simply try again next frame instead.
+        var vtable = *(nint**)camera;
+        if (!this.IsGameCode((nint)vtable))
+        {
+            this.NoteWaiting();
+            return;
+        }
+
+        var updateAddress = vtable[UpdateVTableIndex];
+        if (!this.IsGameCode(updateAddress))
+        {
+            this.NoteWaiting();
+            return;
+        }
+
         try
         {
-            var vtable = *(nint**)camera;
-            var updateAddress = vtable[UpdateVTableIndex];
-
             this.updateHook = this.interop.HookFromAddress<CameraUpdateDelegate>(updateAddress, this.UpdateDetour);
             this.updateHook.Enable();
             this.log.Information($"Hooked CameraBase::Update at 0x{updateAddress:X}");
         }
         catch (Exception ex)
         {
-            this.hookFailed = true;
+            // A validated address that still will not hook is a real failure, not a
+            // timing problem, so stop retrying and say so.
+            this.hookAbandoned = true;
             this.log.Error(ex, "Failed to hook CameraBase::Update; add-on sessions will not be able to drive the camera.");
         }
+    }
+
+    private void NoteWaiting()
+    {
+        if (this.waitingLogged)
+        {
+            return;
+        }
+
+        this.waitingLogged = true;
+        this.log.Debug("Camera is not ready yet; waiting for a valid camera to hook.");
     }
 
     private void UpdateDetour(GameCameraBase* camera)
