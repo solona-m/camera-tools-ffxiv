@@ -17,6 +17,16 @@ namespace CameraToolsXIV.Igcs;
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 internal struct CameraToolsData
 {
+    /// <summary>
+    /// Size of the C++ struct this mirrors: 4 flag bytes, a float, then 15 more floats.
+    /// </summary>
+    /// <remarks>
+    /// Checked at runtime rather than assumed. <see cref="System.Numerics.Vector4"/> is a
+    /// JIT intrinsic with 16-byte natural alignment, so the packing that makes this come
+    /// out at 84 bytes is a guarantee worth verifying instead of relying on.
+    /// </remarks>
+    public const int ExpectedSizeBytes = 84;
+
     /// <summary>1 when the user has our free camera enabled, 0 otherwise.</summary>
     public byte CameraEnabled;
 

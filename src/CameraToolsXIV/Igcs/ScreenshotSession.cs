@@ -138,12 +138,17 @@ internal sealed class ScreenshotSession
             //
             // Scaled into world units: the add-on's steps are in camera-tool units, and
             // converting them is the camera tool's job, not the add-on's.
-            var scale = this.configuration.InvertStepDirection
-                ? -this.configuration.StepScale
-                : this.configuration.StepScale;
+            var scale = this.configuration.StepScale;
+
+            // Inversion mirrors the horizontal axis only. Negating both axes would be a
+            // 180 degree rotation of the aperture, and the aperture is a symmetric sample
+            // pattern -- so it would map onto itself and change nothing about the rendered
+            // stack, while still appearing to do something during the asymmetric setup
+            // step. That would make it useless as the diagnostic it exists to be.
+            var horizontal = this.configuration.InvertStepDirection ? -scale : scale;
 
             var basis = this.camera.HoldBasis;
-            var offset = (basis.Right * stepLeftRight * scale) + (basis.Up * stepUpDown * scale);
+            var offset = (basis.Right * stepLeftRight * horizontal) + (basis.Up * stepUpDown * scale);
 
             this.lastRawStep = new Vector2(stepLeftRight, stepUpDown);
             this.lastOffset = offset;

@@ -70,9 +70,13 @@ internal sealed unsafe class CameraController : IDisposable
     private readonly IPluginLog log;
     private readonly object gate = new();
 
+    /// <summary>Minimum gap between camera-update error logs, in milliseconds.</summary>
+    private const long ErrorLogIntervalMs = 60_000;
+
     private Hook<CameraUpdateDelegate>? updateHook;
     private bool hookAbandoned;
     private bool waitingLogged;
+    private long lastErrorLogMs = long.MinValue;
 
     // The game's code section, used to sanity-check addresses read out of the camera's
     // vtable before handing them to the hooking library.
@@ -98,6 +102,19 @@ internal sealed unsafe class CameraController : IDisposable
     private Vector3 rawLookAt;
 
     private CameraSnapshot lastSnapshot = CameraSnapshot.Invalid;
+    private long lastUpdateMs = long.MinValue;
+
+    /// <summary>
+    /// How long a snapshot stays usable without the camera update refreshing it.
+    /// </summary>
+    /// <remarks>
+    /// The detour is bound to one camera type's vtable slot. If the active camera changes
+    /// to a type that does not share it -- a cutscene or lobby camera -- the detour stops
+    /// firing and nothing else notices. Without an expiry the last snapshot would stay
+    /// marked valid forever, so we would keep publishing a camera position from minutes
+    /// ago and would happily start a session against it.
+    /// </remarks>
+    private const long SnapshotStaleAfterMs = 1000;
 
     /// <summary>
     /// Invoked on the game thread immediately after the camera transform is settled for
@@ -136,11 +153,19 @@ internal sealed unsafe class CameraController : IDisposable
     private bool IsGameCode(nint address)
         => this.moduleEnd == 0 || (address >= this.moduleStart && address < this.moduleEnd);
 
-    /// <summary>The camera as the game last rendered it, refreshed every update.</summary>
+    /// <summary>
+    /// The camera as the game last rendered it, or <see cref="CameraSnapshot.Invalid"/> if
+    /// the camera update has stopped refreshing it.
+    /// </summary>
     public CameraSnapshot LastSnapshot
     {
-        get { lock (this.gate) { return this.lastSnapshot; } }
+        get { lock (this.gate) { return this.SnapshotLocked(); } }
     }
+
+    private CameraSnapshot SnapshotLocked()
+        => Environment.TickCount64 - this.lastUpdateMs > SnapshotStaleAfterMs
+            ? CameraSnapshot.Invalid
+            : this.lastSnapshot;
 
     /// <summary>
     /// Whether the user has made the camera available to ReShade add-ons.
@@ -168,22 +193,20 @@ internal sealed unsafe class CameraController : IDisposable
     /// Arming has no effect on the camera by itself, so there is nothing to be gained by
     /// making it a manual step: an add-on's depth-of-field UI stays hidden until it sees
     /// this flag, and the camera is still only taken over for the duration of a stack.
+    /// <para>
+    /// Disarming deliberately does <b>not</b> release an active hold. Only the session
+    /// that took the camera may give it back: releasing here would leave the session
+    /// believing it still owns a camera that had silently stopped moving, which is
+    /// invisible to the add-on and produces a ghosted stack. Callers cannot avoid this by
+    /// checking for an active session first, because a session can start on the render
+    /// thread between the check and the call.
+    /// </para>
     /// </remarks>
     public void SetArmed(bool value)
     {
         lock (this.gate)
         {
-            if (this.armed == value)
-            {
-                return;
-            }
-
             this.armed = value;
-
-            if (!value)
-            {
-                this.ReleaseHoldLocked();
-            }
         }
     }
 
@@ -208,15 +231,29 @@ internal sealed unsafe class CameraController : IDisposable
     {
         lock (this.gate)
         {
-            if (!this.lastSnapshot.Valid)
+            var snapshot = this.SnapshotLocked();
+            if (!snapshot.Valid)
             {
                 return false;
             }
 
             this.holdPosition = this.rawPosition;
             this.holdLookAt = this.rawLookAt;
-            this.holdEye = this.lastSnapshot.Position;
-            this.holdBasis = this.lastSnapshot.Basis;
+            this.holdEye = snapshot.Position;
+            this.holdBasis = snapshot.Basis;
+
+            // We write scene->Position but publish the view matrix's eye point, which is
+            // only sound while the two translate together. They are identical in FFXIV,
+            // and a divergence would silently misreport where the camera is -- presenting
+            // as depth of field that cannot be focused -- so say so rather than guess.
+            var divergence = Vector3.Distance(this.holdEye, this.holdPosition);
+            if (divergence > 0.01f)
+            {
+                this.log.Warning(
+                    $"Camera eye and scene position differ by {divergence:F3} units; " +
+                    "published position may not match the rendered camera.");
+            }
+
             this.sessionOffset = Vector3.Zero;
             this.fovOverrideRadians = null;
             this.holding = true;
@@ -364,8 +401,15 @@ internal sealed unsafe class CameraController : IDisposable
         }
         catch (Exception ex)
         {
-            // Never let an exception escape into the game's update path.
-            this.log.Error(ex, "Camera update failed.");
+            // Never let an exception escape into the game's update path. Throttled because
+            // this runs every frame: an unthrottled fault would log at frame rate and
+            // degrade the game through sheer log I/O.
+            var now = Environment.TickCount64;
+            if (now - this.lastErrorLogMs > ErrorLogIntervalMs)
+            {
+                this.lastErrorLogMs = now;
+                this.log.Error(ex, "Camera update failed.");
+            }
         }
     }
 
@@ -424,6 +468,7 @@ internal sealed unsafe class CameraController : IDisposable
             }
 
             this.lastSnapshot = new CameraSnapshot(true, eye, basis, fov, scenePosition, aspect);
+            this.lastUpdateMs = Environment.TickCount64;
         }
 
         // Outside the lock: the callback publishes to the add-on and must not be able to
