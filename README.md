@@ -76,6 +76,32 @@ accumulation stack has to be a set of *parallel* translations. If the camera kep
 at a fixed world point while stepping sideways it would toe in, and the shader's
 focus-delta realignment assumes it did not.
 
+### Holding the scene still
+
+An accumulation stack composites many frames of the same moment, so anything that moves
+between them ghosts. Group Pose stops actors *acting* but not their physics, and a skirt
+or a length of hair swinging through a stack ghosts harder than anything else in shot,
+because it is high-contrast and sits right on the subject.
+
+So for the seconds a stack takes — and only those seconds — the plugin hooks
+`hkaPartialSkeleton::SetBoneModelTransform` and drops the simulation's result. That is the
+shared havok write path, so the freeze covers every drawn skeleton at once: you, other
+players, NPCs, minions, mounts. This is the same thing Brio's "Freeze Physics" button does,
+done here so there is one less plugin to run and one less thing to remember to press. It
+needs a signature, so a game patch can take it away; when that happens the plugin says so
+in its window and everything else carries on.
+
+**"Pause the world"** goes after the rest of it, and is also on by default. Freezing
+physics leaves the environment moving, and the only lever that reaches water, foliage,
+weather and particles is the game's frame delta itself — the same one the game drives to
+nothing when it puts up a message box. Stopping it stops chat and movement too, which is a
+real cost and the default anyway: a 1024-sample stack occupies the game for four minutes
+whichever way you set this, and finding out afterwards that the foliage moved is worse
+than knowing in advance that chat will be quiet until it finishes. It is bounded by the
+stack, and released after twenty minutes regardless — long enough to clear any plausible
+render, since a watchdog that fires mid-stack thaws the world for the back half and ruins
+it more thoroughly than never freezing at all.
+
 ## Installing
 
 Add this to Dalamud's custom plugin repositories (`/xlsettings` → Experimental):
@@ -122,20 +148,59 @@ plausible-looking garbage rather than a crash, so they are worth catching on the
 ## Status
 
 Working: the IGCS export surface, add-on discovery and per-frame data publishing, the
-session-scoped camera override, and the screenshot-session semantics that depth of field
-drives.
+session-scoped camera override, the screenshot-session semantics that depth of field
+drives, and the session-scoped physics freeze and world pause.
 
-Confirmed in-game: Parallax DoF discovers the exports by module scan, connects, and drives
-the camera through a session. The published basis checks out as orthonormal and
-left-handed consistent (`right × up` equals `fwd` exactly).
-
-Still unverified: a *completed* stack. Everything tested so far has been the setup
-preview, not a full 1024-sample render.
+Confirmed in-game: a **completed 1024-sample stack**, sharp to the freckles, with no
+ghosting on hair or cloth. Parallax DoF discovers the exports by module scan, connects,
+and drives the camera through a session. The published basis checks out as orthonormal and
+left-handed consistent (`right × up` equals `fwd` exactly), and the step conversion is
+exactly 1:1 — a blur radius of *r* produces an offset of *r* world units, measurable on
+the plugin's own panel.
 
 Deliberately not built: fly controls. Parallax DoF needs us to *own* the camera position,
 not to move it for you, and Cammy and Brio already do camera movement well. Still open,
 if they turn out to be wanted: camera paths with interpolated playback, presets, and
 rebindable hotkeys.
+
+### Suggested Parallax DoF settings
+
+A starting point that produces a clean stack in Group Pose. The only value here that is
+really *about FFXIV* is the blur radius; the rest is taste.
+
+| Setting | Value |
+|---|---|
+| Accumulation Init / Delay | 4 frames each |
+| Rangefinder Focus | ~15.1 (per shot) |
+| **Blur Radius** | **0.003** |
+| Bokeh Intensity / Gamma / Colour | 0.550 / 0.580 / 0.370 |
+| Aperture | Circular, aspect 1.000 |
+| Sample Count | 1024 (about four minutes) |
+
+**Blur Radius is the one to get right, and it is the aperture in FFXIV world units.** The
+plugin converts add-on steps 1:1, so a radius of 1.0 — Parallax DoF's default — asks for a
+one-metre aperture. FFXIV's unit is roughly a metre, and Marty's default assumes a game
+whose units are far smaller. A metre of baseline sees *behind* your subject: you get two
+separate exposures rather than a blur, and no focus setting rescues it, because the
+parallax is real. **0.003 is about three millimetres**, which is a lens.
+
+Watch the plugin's `moved` line while the setup preview runs — it reads the offset in
+world units, and it should equal the blur radius exactly. That is the fastest way to
+confirm the whole chain is behaving.
+
+**Rangefinder Focus is logarithmic** (`exp2(FOCUS_DELTA - 16)`), so a fraction of a slider
+unit moves the focal plane a long way and it is easy to overshoot the subject onto the
+background. If a render comes back with a blurred foreground and a crisp background, the
+focal plane has landed behind your subject — walk the rangefinder back rather than
+touching anything else. Values below about 10 are indistinguishable from zero.
+
+Reduce the radius further for less background streaking. Parallax DoF only has the pixels
+the game rendered and knows nothing about what sits behind your subject, so at depth it
+smears rather than forming clean bokeh discs. A hedge two metres back bokehs cleanly; a
+treeline fifteen metres back will always streak. That is the technique, not a fault.
+
+Disable V-Sync, per Marty's own guidance — the accumulation frames are stepped, and V-Sync
+desynchronises the stepping.
 
 ### Calibration
 
@@ -146,16 +211,18 @@ should track as you move the camera.
 
 ## Limitations
 
-- **Parallax DoF wants a paused world, and FFXIV cannot pause.** Group Pose freezes
-  actors, but water, foliage, weather and particles keep animating and will ghost across
-  a stack. Inherent to an MMO; manageable by shot selection, not fixable here.
+- **The world can be held still, at a price.** Group Pose freezes what actors *do*, not
+  what hangs off them, so the plugin freezes bone physics itself and pauses the game's
+  clock for the length of a stack. Both are on by default. The pause is the blunt one: the
+  game stops responding — chat, movement, everything — until the stack finishes.
+- **Background streaking is inherent to parallax depth of field.** The shader only has the
+  pixels the game rendered and cannot know what sits behind your subject, so distant
+  detail smears instead of forming bokeh discs. Manageable by shot selection and a smaller
+  aperture; not fixable here.
 - Disable V-Sync for frame-step synchronisation, per Marty's own guidance.
 - The camera is only offered to add-ons in Group Pose by default. The setting to allow it
   during normal play is deliberately opt-in: a camera an add-on can reposition freely in
   the overworld sees through walls and terrain.
-- Marty's rangefinder is logarithmic (`exp2(FOCUS_DELTA - 16)`), so values below about 10
-  are indistinguishable from zero and read as the control doing nothing. It also
-  multiplies with the blur radius, so neither can be zero.
 - Dalamud plugins are against FFXIV's Terms of Service. This is client-side visual
   tooling in the same category as Brio and Ktisis.
 
