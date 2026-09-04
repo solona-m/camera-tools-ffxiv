@@ -143,6 +143,7 @@ internal sealed class MainWindow : Window
         ImGui.TextUnformatted("Published to ReShade");
         ImGui.Indent();
         ImGui.TextUnformatted($"pos    {snapshot.Position.X,9:F3} {snapshot.Position.Y,9:F3} {snapshot.Position.Z,9:F3}");
+        ImGui.TextUnformatted($"scene  {snapshot.ScenePosition.X,9:F3} {snapshot.ScenePosition.Y,9:F3} {snapshot.ScenePosition.Z,9:F3}");
         ImGui.TextUnformatted($"fov    {float.RadiansToDegrees(snapshot.FovRadians),9:F3} deg");
         ImGui.TextUnformatted($"right  {snapshot.Basis.Right.X,9:F3} {snapshot.Basis.Right.Y,9:F3} {snapshot.Basis.Right.Z,9:F3}");
         ImGui.TextUnformatted($"up     {snapshot.Basis.Up.X,9:F3} {snapshot.Basis.Up.Y,9:F3} {snapshot.Basis.Up.Z,9:F3}");

@@ -10,13 +10,22 @@ using SceneCamera = FFXIVClientStructs.FFXIV.Client.Graphics.Scene.Camera;
 namespace CameraToolsXIV.Camera;
 
 /// <summary>A read of the camera as the game last rendered it.</summary>
+/// <param name="Position">
+/// The eye position recovered from the view matrix -- the camera's true world position.
+/// </param>
+/// <param name="ScenePosition">
+/// The scene camera's own Position field, kept alongside for diagnosis. It is not assumed
+/// to equal <paramref name="Position"/>; if the two disagree, the engine is storing
+/// something other than the eye point there.
+/// </param>
 internal readonly record struct CameraSnapshot(
     bool Valid,
     Vector3 Position,
     ViewBasis Basis,
-    float FovRadians)
+    float FovRadians,
+    Vector3 ScenePosition)
 {
-    public static CameraSnapshot Invalid => new(false, Vector3.Zero, ViewBasis.Identity, 0f);
+    public static CameraSnapshot Invalid => new(false, Vector3.Zero, ViewBasis.Identity, 0f, Vector3.Zero);
 }
 
 /// <summary>
@@ -43,9 +52,6 @@ internal sealed unsafe class CameraController : IDisposable
     /// <summary>Index of <c>Update</c> in CameraBaseVirtualTable (offset 0x18 / 8).</summary>
     private const int UpdateVTableIndex = 3;
 
-    /// <summary>Distance used to project the look-at point along the view direction.</summary>
-    private const float LookAtDistance = 10f;
-
     private delegate void CameraUpdateDelegate(GameCameraBase* camera);
 
     private readonly IGameInteropProvider interop;
@@ -65,10 +71,19 @@ internal sealed unsafe class CameraController : IDisposable
     // the game thread, so every one of these crosses a thread boundary.
     private bool armed;
     private bool holding;
-    private Vector3 holdOrigin;
-    private ViewBasis holdBasis = ViewBasis.Identity;
     private Vector3 sessionOffset;
     private float? fovOverrideRadians;
+
+    // The camera exactly as the game had it when the hold began. Both the position and
+    // the look-at point are kept so that a step can translate the pair together.
+    private Vector3 holdPosition;
+    private Vector3 holdLookAt;
+    private Vector3 holdEye;
+    private ViewBasis holdBasis = ViewBasis.Identity;
+
+    // The most recent unmodified values, so that BeginHold can capture them.
+    private Vector3 rawPosition;
+    private Vector3 rawLookAt;
 
     private CameraSnapshot lastSnapshot = CameraSnapshot.Invalid;
 
@@ -152,10 +167,17 @@ internal sealed unsafe class CameraController : IDisposable
     /// </summary>
     /// <returns>False if there is no valid camera to hold.</returns>
     /// <remarks>
-    /// The basis is frozen along with the position on purpose. An accumulation stack has
-    /// to be a set of parallel translations: if the camera kept looking at a fixed world
-    /// point while stepping sideways it would toe in, and the shader's focus-delta
-    /// realignment assumes it did not.
+    /// Captures the camera's own position and look-at point rather than rebuilding them
+    /// from a direction vector. A step then translates the pair by the same offset, which
+    /// is a parallel shift by construction -- no assumption about which way the view
+    /// matrix's forward axis points, and no invented look-at distance. Both of those are
+    /// easy to get backwards, and getting them backwards aims the camera at whatever is
+    /// behind it.
+    /// <para>
+    /// Translating both is also what an accumulation stack requires. Moving the position
+    /// while leaving the look-at pinned to a fixed world point would toe the camera in,
+    /// and the shader's focus-delta realignment assumes it did not.
+    /// </para>
     /// </remarks>
     public bool BeginHold()
     {
@@ -166,7 +188,9 @@ internal sealed unsafe class CameraController : IDisposable
                 return false;
             }
 
-            this.holdOrigin = this.lastSnapshot.Position;
+            this.holdPosition = this.rawPosition;
+            this.holdLookAt = this.rawLookAt;
+            this.holdEye = this.lastSnapshot.Position;
             this.holdBasis = this.lastSnapshot.Basis;
             this.sessionOffset = Vector3.Zero;
             this.fovOverrideRadians = null;
@@ -194,7 +218,33 @@ internal sealed unsafe class CameraController : IDisposable
     public ViewBasis HoldBasis
     {
         get { lock (this.gate) { return this.holdBasis; } }
-        set { lock (this.gate) { this.holdBasis = value; } }
+    }
+
+    /// <summary>
+    /// Rotates the held view about the world up axis, for panorama sessions.
+    /// </summary>
+    /// <remarks>
+    /// Rotates the look-at point around the camera rather than re-deriving it from the
+    /// basis, so it stays consistent with how a hold is applied. Rotating about world up
+    /// rather than the camera's own up keeps the horizon level on a pitched shot.
+    /// </remarks>
+    public void RotateHold(float angleRadians)
+    {
+        lock (this.gate)
+        {
+            if (!this.holding)
+            {
+                return;
+            }
+
+            var rotation = Matrix4x4.CreateFromAxisAngle(Vector3.UnitY, angleRadians);
+
+            this.holdLookAt = this.holdPosition + Vector3.Transform(this.holdLookAt - this.holdPosition, rotation);
+            this.holdBasis = new ViewBasis(
+                Vector3.Normalize(Vector3.Transform(this.holdBasis.Right, rotation)),
+                Vector3.Normalize(Vector3.Transform(this.holdBasis.Up, rotation)),
+                Vector3.Normalize(Vector3.Transform(this.holdBasis.Forward, rotation)));
+        }
     }
 
     /// <summary>
@@ -314,24 +364,40 @@ internal sealed unsafe class CameraController : IDisposable
         // Explicitly typed: FFXIVClientStructs has its own Vector3 that converts
         // implicitly to this one, and `var` would leave arithmetic below ambiguous
         // between the two.
-        Vector3 position = scene->Position;
+        Vector3 scenePosition = scene->Position;
+        Vector3 sceneLookAt = scene->LookAtVector;
         var basis = ViewBasis.FromViewMatrix(render->ViewMatrix);
         var fov = render->FoV;
 
+        // The eye position recovered from the view matrix, which is the camera's true
+        // world position by definition. The scene camera's own Position field is not
+        // assumed to be the same thing.
+        var eye = basis.PositionFromViewMatrix(render->ViewMatrix);
+
         lock (this.gate)
         {
+            this.rawPosition = scenePosition;
+            this.rawLookAt = sceneLookAt;
+
             if (this.holding)
             {
-                position = this.holdOrigin + this.sessionOffset;
-                basis = this.holdBasis;
-                fov = this.fovOverrideRadians ?? fov;
+                // Translate the position and the look-at point by the same offset. This
+                // preserves the framing the user set, and is a parallel shift whatever
+                // the engine's axis conventions turn out to be.
+                scene->Position = this.holdPosition + this.sessionOffset;
+                scene->LookAtVector = this.holdLookAt + this.sessionOffset;
 
-                scene->Position = position;
-                scene->LookAtVector = position + (basis.Forward * LookAtDistance);
-                render->FoV = fov;
+                if (this.fovOverrideRadians is { } overrideFov)
+                {
+                    render->FoV = overrideFov;
+                    fov = overrideFov;
+                }
+
+                eye = this.holdEye + this.sessionOffset;
+                basis = this.holdBasis;
             }
 
-            this.lastSnapshot = new CameraSnapshot(true, position, basis, fov);
+            this.lastSnapshot = new CameraSnapshot(true, eye, basis, fov, scenePosition);
         }
     }
 

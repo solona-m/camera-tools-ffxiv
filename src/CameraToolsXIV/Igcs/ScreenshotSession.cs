@@ -129,15 +129,7 @@ internal sealed class ScreenshotSession
                 return;
             }
 
-            // Panoramas rotate about the world up axis so the horizon stays level, rather
-            // than about the camera's own up, which would tilt on a pitched shot.
-            var rotation = Matrix4x4.CreateFromAxisAngle(Vector3.UnitY, stepAngle);
-            var basis = this.camera.HoldBasis;
-
-            this.camera.HoldBasis = new ViewBasis(
-                Vector3.Normalize(Vector3.Transform(basis.Right, rotation)),
-                Vector3.Normalize(Vector3.Transform(basis.Up, rotation)),
-                Vector3.Normalize(Vector3.Transform(basis.Forward, rotation)));
+            this.camera.RotateHold(stepAngle);
         }
     }
 
