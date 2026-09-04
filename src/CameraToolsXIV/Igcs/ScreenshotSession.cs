@@ -123,7 +123,10 @@ internal sealed class ScreenshotSession
             //
             // Scaled into world units: the add-on's steps are in camera-tool units, and
             // converting them is the camera tool's job, not the add-on's.
-            var scale = this.configuration.StepScale;
+            var scale = this.configuration.InvertStepDirection
+                ? -this.configuration.StepScale
+                : this.configuration.StepScale;
+
             var basis = this.camera.HoldBasis;
             var offset = (basis.Right * stepLeftRight * scale) + (basis.Up * stepUpDown * scale);
 

@@ -169,7 +169,7 @@ internal sealed class MainWindow : Window
         }
 
         var stepScale = this.configuration.StepScale;
-        if (ImGui.SliderFloat("Step scale", ref stepScale, 0.001f, 0.5f, "%.3f"))
+        if (ImGui.SliderFloat("Step scale", ref stepScale, 0.01f, 2.0f, "%.3f"))
         {
             this.configuration.StepScale = stepScale;
             this.saveConfiguration();
@@ -178,9 +178,31 @@ internal sealed class MainWindow : Window
         if (ImGui.IsItemHovered())
         {
             ImGui.SetTooltip(
-                "Converts the add-on's step values into FFXIV world units.\n" +
-                "Lower this if the camera lurches during a stack; raise it if the\n" +
-                "depth-of-field effect is too subtle to see.");
+                "Leave at 1.000.\n\n" +
+                "The add-on reprojects each frame assuming the camera moved exactly as\n" +
+                "far as it asked, so anything else puts the camera where the shader does\n" +
+                "not think it is, and its focus control runs out of range before it can\n" +
+                "reach the subject.\n\n" +
+                "To change how far the camera travels, use the add-on's own blur radius.");
+        }
+
+        if (Math.Abs(this.configuration.StepScale - 1.0f) > 0.001f)
+        {
+            ImGui.TextColored(Bad, "Step scale is not 1.0 -- focus may be unreachable.");
+        }
+
+        var invert = this.configuration.InvertStepDirection;
+        if (ImGui.Checkbox("Invert step direction", ref invert))
+        {
+            this.configuration.InvertStepDirection = invert;
+            this.saveConfiguration();
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip(
+                "Only if the add-on focuses on the background when asked to focus on\n" +
+                "the foreground. That is what a mirrored step direction looks like.");
         }
 
         ImGui.Separator();

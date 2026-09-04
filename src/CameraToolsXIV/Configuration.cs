@@ -21,11 +21,30 @@ public sealed class Configuration : IPluginConfiguration
     /// Converts an add-on's step values into FFXIV world units.
     /// </summary>
     /// <remarks>
-    /// IGCS add-ons send steps in camera-tool units, not world units -- IgcsConnector's
-    /// own interface notes that steps are "not divided by movementspeed yet, so it has to
-    /// be done locally". Each camera tool applies its game's own scale. FFXIV's units are
-    /// roughly metres, so an aperture wants centimetres of travel; applying the add-on's
-    /// values raw throws the camera metres per step, through whatever is nearby.
+    /// <para>
+    /// Should normally stay at 1. The add-on reprojects each frame assuming the camera
+    /// moved exactly as far as it asked, so scaling here puts the camera somewhere the
+    /// shader does not think it is. Its focus control is a ratio and can absorb a constant
+    /// factor, but only within its own range: at a scale of 0.06 the focus delta needed is
+    /// some fifteen times what the slider offers, and the subject can never be brought
+    /// into focus.
+    /// </para>
+    /// <para>
+    /// Use the add-on's own blur radius to control how far the camera travels. That is the
+    /// aperture size, and unlike this it is a value the shader knows about.
+    /// </para>
     /// </remarks>
-    public float StepScale { get; set; } = 0.02f;
+    public float StepScale { get; set; } = 1.0f;
+
+    /// <summary>
+    /// Mirrors the direction of add-on steps.
+    /// </summary>
+    /// <remarks>
+    /// An escape hatch, not an expected setting. If the step direction were mirrored the
+    /// parallax would invert, and the add-on would focus on the background when asked to
+    /// focus on the foreground. The basis we publish checks out as left-handed and
+    /// self-consistent, so this should not be needed -- but it is the one assumption that
+    /// cannot be verified without running a stack, and flipping it is a decisive test.
+    /// </remarks>
+    public bool InvertStepDirection { get; set; }
 }
