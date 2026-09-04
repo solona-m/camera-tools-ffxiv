@@ -9,9 +9,14 @@
 // The harness plays both sides: it registers callbacks the way the plugin does, then
 // discovers and calls the exports exactly the way an add-on does -- by walking the
 // process's loaded modules and resolving IGCS_StartScreenshotSession by name.
+//
+// Registration deliberately mirrors the plugin's own mechanism -- rooted delegates
+// through Marshal.GetFunctionPointerForDelegate rather than [UnmanagedCallersOnly] --
+// because that is the path that actually ships. The plugin cannot use
+// [UnmanagedCallersOnly]: taking a function pointer to one is unsupported from the
+// collectible AssemblyLoadContext Dalamud loads plugins into.
 
 using System.Diagnostics;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 var shimPath = args.Length > 0
@@ -45,6 +50,13 @@ var module = NativeLibrary.Load(shimPath);
 
 // --- The plugin's side: register managed callbacks --------------------------------
 
+// Rooted for the lifetime of the process: the native side keeps raw pointers to these,
+// so letting them be collected would leave it calling into freed memory.
+var startCallback = new StartScreenshotSessionDelegate(Recorder.OnStart);
+var panoramaCallback = new MoveCameraPanoramaDelegate(Recorder.OnPanorama);
+var multishotCallback = new MoveCameraMultishotDelegate(Recorder.OnMultishot);
+var endCallback = new EndScreenshotSessionDelegate(Recorder.OnEnd);
+
 unsafe
 {
     var register = (delegate* unmanaged[Cdecl]<Callbacks*, void>)
@@ -52,10 +64,10 @@ unsafe
 
     var callbacks = new Callbacks
     {
-        StartScreenshotSession = &Recorder.OnStart,
-        MoveCameraPanorama = &Recorder.OnPanorama,
-        MoveCameraMultishot = &Recorder.OnMultishot,
-        EndScreenshotSession = &Recorder.OnEnd,
+        StartScreenshotSession = Marshal.GetFunctionPointerForDelegate(startCallback),
+        MoveCameraPanorama = Marshal.GetFunctionPointerForDelegate(panoramaCallback),
+        MoveCameraMultishot = Marshal.GetFunctionPointerForDelegate(multishotCallback),
+        EndScreenshotSession = Marshal.GetFunctionPointerForDelegate(endCallback),
     };
 
     register(&callbacks);
@@ -140,17 +152,34 @@ unsafe
     Check("end after unregister is a no-op", Recorder.EndCount == 1, $"got {Recorder.EndCount}");
 }
 
+GC.KeepAlive(startCallback);
+GC.KeepAlive(panoramaCallback);
+GC.KeepAlive(multishotCallback);
+GC.KeepAlive(endCallback);
+
 Console.WriteLine();
 Console.WriteLine(failures == 0 ? "All checks passed." : $"{failures} check(s) failed.");
 return failures == 0 ? 0 : 1;
 
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+delegate int StartScreenshotSessionDelegate(byte type);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+delegate void MoveCameraPanoramaDelegate(float stepAngle);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+delegate void MoveCameraMultishotDelegate(float stepLeftRight, float stepUpDown, float fovDegrees, byte fromStartPosition);
+
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+delegate void EndScreenshotSessionDelegate();
+
 [StructLayout(LayoutKind.Sequential)]
-unsafe struct Callbacks
+struct Callbacks
 {
-    public delegate* unmanaged[Cdecl]<byte, int> StartScreenshotSession;
-    public delegate* unmanaged[Cdecl]<float, void> MoveCameraPanorama;
-    public delegate* unmanaged[Cdecl]<float, float, float, byte, void> MoveCameraMultishot;
-    public delegate* unmanaged[Cdecl]<void> EndScreenshotSession;
+    public nint StartScreenshotSession;
+    public nint MoveCameraPanorama;
+    public nint MoveCameraMultishot;
+    public nint EndScreenshotSession;
 }
 
 static class Recorder
@@ -163,17 +192,14 @@ static class Recorder
     public static float LastAngle;
     public static int EndCount;
 
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static int OnStart(byte type)
     {
         LastType = type;
         return 0;
     }
 
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static void OnPanorama(float stepAngle) => LastAngle = stepAngle;
 
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static void OnMultishot(float leftRight, float upDown, float fov, byte fromStart)
     {
         LastLeftRight = leftRight;
@@ -182,6 +208,5 @@ static class Recorder
         LastFromStart = fromStart;
     }
 
-    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     public static void OnEnd() => EndCount++;
 }

@@ -28,6 +28,9 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IgcsBridge bridge;
     private readonly ConnectorLink connector;
     private readonly MainWindow window;
+    private readonly string pluginDirectory;
+
+    private bool bridgeLoadAttempted;
 
     public Plugin(IDalamudPluginInterface pluginInterface)
     {
@@ -39,8 +42,7 @@ public sealed class Plugin : IDalamudPlugin
         this.session = new ScreenshotSession(this.camera, Log);
         this.bridge = new IgcsBridge(Log);
         this.connector = new ConnectorLink(Log);
-
-        this.bridge.Load(PluginInterface.AssemblyLocation.Directory?.FullName ?? string.Empty, this.session);
+        this.pluginDirectory = PluginInterface.AssemblyLocation.Directory?.FullName ?? string.Empty;
 
         this.window = new MainWindow(
             this.configuration,
@@ -65,6 +67,15 @@ public sealed class Plugin : IDalamudPlugin
 
     private void OnFrameworkUpdate(IFramework framework)
     {
+        // Deferred out of the constructor on purpose. Dalamud builds plugins on its own
+        // load thread while holding assembly-loading locks; taking the Windows loader
+        // lock underneath those deadlocks the whole process rather than just failing.
+        if (!this.bridgeLoadAttempted)
+        {
+            this.bridgeLoadAttempted = true;
+            this.bridge.Load(this.pluginDirectory, this.session);
+        }
+
         this.camera.EnsureHooked();
         this.connector.TryConnect();
 
