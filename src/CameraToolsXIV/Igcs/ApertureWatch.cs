@@ -93,6 +93,8 @@ internal sealed class ApertureWatch
         this.lastTooLargeAt = nowMs;
         this.lastTooLargeStep = length;
 
+        // The first too-large step, not the largest: the tick takes this within a frame,
+        // long before the add-on sends another step, so the two do not differ in practice.
         if (!this.announced)
         {
             this.announced = true;

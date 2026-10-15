@@ -111,8 +111,7 @@ internal sealed class MainWindow : Window
                 ImGui.TextUnformatted(setting);
                 ImGui.TableNextColumn();
 
-                // Blur Radius is the one that ruins a stack when left at the default.
-                if (setting == "Blur Radius")
+                if (setting == ParallaxDofGuidance.BlurRadiusSetting)
                 {
                     ImGui.TextColored(Highlight, value);
                 }

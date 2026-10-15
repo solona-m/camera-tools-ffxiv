@@ -19,11 +19,14 @@ internal static class ParallaxDofGuidance
 {
     public const string RecommendedBlurRadius = "0.003";
 
+    /// <summary>The row label of the one setting that ruins a stack when left at default.</summary>
+    public const string BlurRadiusSetting = "Blur Radius";
+
     public static IReadOnlyList<(string Setting, string Value)> Recommended { get; } =
     [
         ("Accumulation Init / Delay", "4 frames each"),
         ("Rangefinder Focus", "~15.1 (per shot)"),
-        ("Blur Radius", RecommendedBlurRadius),
+        (BlurRadiusSetting, RecommendedBlurRadius),
         ("Bokeh Intensity / Gamma / Colour", "0.550 / 0.580 / 0.370"),
         ("Aperture", "Circular, aspect 1.000"),
         ("Sample Count", "1024 (about four minutes)"),

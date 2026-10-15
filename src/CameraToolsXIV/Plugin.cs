@@ -183,24 +183,37 @@ public sealed class Plugin : IDalamudPlugin
         this.physicsFreeze!.SetFrozen(this.configuration!.FreezePhysicsDuringSession && freezing);
         this.worldPause!.SetPaused(this.configuration.PauseWorldDuringSession && freezing);
 
-        // The session notices an oversized aperture on the render thread, where chat may
-        // not be touched, so it only leaves a note for here. After the freeze and pause, so
-        // that a chat failure cannot cost a stack either of them.
-        if (this.session.TakeApertureAnnouncement() is { } step)
-        {
-            try
-            {
-                this.chatGui.PrintError(ParallaxDofGuidance.ChatMessage(step));
-                this.log.Warning($"Add-on stepped the camera {step:F3} world units; Blur Radius is far too large.");
-            }
-            catch (Exception ex)
-            {
-                this.log.Warning(ex, "Could not post the Blur Radius warning to chat.");
-            }
-        }
+        // After the freeze and pause, so that a chat failure cannot cost a stack either.
+        this.PostApertureWarningToChat();
 
         // Camera data is published from the camera update itself, not here, so that what
         // the add-on reads always describes the frame about to be rendered.
+    }
+
+    /// <summary>
+    /// Tells the user in chat, once per session, that the add-on's Blur Radius is far too
+    /// large for FFXIV.
+    /// </summary>
+    /// <remarks>
+    /// The session notices on ReShade's render thread, where chat may not be touched, so it
+    /// only leaves a note; this is the game-thread half that delivers it.
+    /// </remarks>
+    private void PostApertureWarningToChat()
+    {
+        if (this.session!.TakeApertureAnnouncement() is not { } step)
+        {
+            return;
+        }
+
+        try
+        {
+            this.chatGui.PrintError(ParallaxDofGuidance.ChatMessage(step));
+            this.log.Warning($"Add-on stepped the camera {step:F3} world units; Blur Radius is far too large.");
+        }
+        catch (Exception ex)
+        {
+            this.log.Warning(ex, "Could not post the Blur Radius warning to chat.");
+        }
     }
 
     /// <summary>
