@@ -110,8 +110,8 @@ Add this to Dalamud's custom plugin repositories (`/xlsettings` → Experimental
 https://dl.solona.info/repo.json
 ```
 
-Camera Tools is **testing-exclusive** until its first stable release, so enable "Get
-plugin testing builds" in the same settings page or it will not appear in the list.
+Stable releases appear in the list as normal. Enable "Get plugin testing builds" in the
+same settings page only if you want testing builds ahead of them.
 
 You also need [ReShade](https://reshade.me) 6.4 or newer **with add-on support**, plus a
 depth-of-field add-on that speaks IGCS — iMMERSE Parallax DoF, or Otis_Inf's
