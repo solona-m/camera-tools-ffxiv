@@ -81,8 +81,12 @@ internal static class ApertureWatchChecks
 
         // --- After the session -------------------------------------------------------
 
+        // The last step is small, as a centre sample or a return to the origin would be, so
+        // only the verdict frozen at the end can keep this warning up -- re-judging later
+        // would find the 2 s window long gone and nothing too large left.
         watch = new ApertureWatch();
         watch.Observe(1f, 0f, T0);
+        watch.Observe(0.003f, 0f, T0 + 50);
         watch.SessionEnded(T0 + 100);
         status = watch.Status(T0 + 600_000);
         check("[AC-blur-radius-warning-5] warning persists after the session ends",
