@@ -11,4 +11,11 @@
     <RootNamespace>IgcsBridgeHarness</RootNamespace>
   </PropertyGroup>
 
+  <!-- Linked rather than referenced: the plugin project needs Dalamud to build, and these
+       two files deliberately do not, so the harness can check them off the game. -->
+  <ItemGroup>
+    <Compile Include="..\..\src\CameraToolsXIV\Igcs\ApertureWatch.cs" Link="Linked\ApertureWatch.cs" />
+    <Compile Include="..\..\src\CameraToolsXIV\Igcs\ParallaxDofGuidance.cs" Link="Linked\ParallaxDofGuidance.cs" />
+  </ItemGroup>
+
 </Project>

@@ -41,6 +41,10 @@ internal sealed class ScreenshotSession
     private readonly IPluginLog log;
     private readonly object gate = new();
 
+    // Guarded by `gate`, like everything below: steps arrive on the render thread, while
+    // the window and the framework tick read the verdict on the game thread.
+    private readonly ApertureWatch apertureWatch = new();
+
     private bool active;
     private bool wasAborted;
     private byte sessionType;
@@ -114,6 +118,23 @@ internal sealed class ScreenshotSession
         get { lock (this.gate) { return (this.totalPanoramaAngle, this.panoramaCalls); } }
     }
 
+    /// <summary>Whether the add-on is asking for an aperture far too large for FFXIV.</summary>
+    public ApertureStatus ApertureStatus
+    {
+        get { lock (this.gate) { return this.apertureWatch.Status(Environment.TickCount64); } }
+    }
+
+    /// <summary>
+    /// The too-large step to tell the user about in chat, at most once per session.
+    /// </summary>
+    public float? TakeApertureAnnouncement()
+    {
+        lock (this.gate)
+        {
+            return this.apertureWatch.TakeAnnouncement();
+        }
+    }
+
     public int Start(byte type)
     {
         lock (this.gate)
@@ -146,6 +167,7 @@ internal sealed class ScreenshotSession
             this.lastPanoramaAngle = 0f;
             this.totalPanoramaAngle = 0f;
             this.panoramaCalls = 0;
+            this.apertureWatch.Reset();
         }
 
         this.log.Information($"IGCS session started (type {type}).");
@@ -188,6 +210,10 @@ internal sealed class ScreenshotSession
             this.lastRawStep = new Vector2(stepLeftRight, stepUpDown);
             this.lastOffset = offset;
 
+            // Observed, never acted on: the step above is applied exactly as sent. This
+            // only decides whether to tell the user their Blur Radius is wrong.
+            this.apertureWatch.Observe(stepLeftRight, stepUpDown, Environment.TickCount64);
+
             this.camera.SessionOffset = fromStartPosition
                 ? offset
                 : this.camera.SessionOffset + offset;
@@ -228,6 +254,7 @@ internal sealed class ScreenshotSession
             }
 
             this.camera.ReleaseHold();
+            this.apertureWatch.SessionEnded(Environment.TickCount64);
             this.active = false;
         }
 
@@ -257,6 +284,7 @@ internal sealed class ScreenshotSession
             }
 
             this.camera.ReleaseHold();
+            this.apertureWatch.SessionEnded(Environment.TickCount64);
             this.active = false;
             this.wasAborted = true;
         }

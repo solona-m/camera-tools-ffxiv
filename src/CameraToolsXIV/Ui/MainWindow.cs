@@ -14,6 +14,7 @@ internal sealed class MainWindow : Window
     private static readonly Vector4 Good = new(0.35f, 0.85f, 0.45f, 1f);
     private static readonly Vector4 Bad = new(0.90f, 0.40f, 0.40f, 1f);
     private static readonly Vector4 Muted = new(0.65f, 0.65f, 0.65f, 1f);
+    private static readonly Vector4 Highlight = new(0.95f, 0.80f, 0.35f, 1f);
 
     private readonly Configuration configuration;
     private readonly CameraController camera;
@@ -58,11 +59,77 @@ internal sealed class MainWindow : Window
     {
         this.DrawStatus();
         ImGui.Separator();
+        this.DrawApertureWarning();
         this.DrawCameraControls();
         ImGui.Separator();
         this.DrawLiveValues();
         ImGui.Separator();
+        this.DrawRecommendedSettings();
         this.DrawSettings();
+    }
+
+    /// <summary>
+    /// Says, near the top and in red, when the add-on's aperture is far too large.
+    /// </summary>
+    /// <remarks>
+    /// Shown after a session as well as during one. A stack takes minutes, and someone
+    /// coming back to a blurred subject needs the reason still on screen.
+    /// </remarks>
+    private void DrawApertureWarning()
+    {
+        var status = this.session.ApertureStatus;
+        if (!status.Warn)
+        {
+            return;
+        }
+
+        ImGui.TextColored(Bad, ParallaxDofGuidance.WarningHeading(status.FromEndedSession));
+        ImGui.TextWrapped(ParallaxDofGuidance.WarningBody(status.Step));
+        ImGui.Separator();
+    }
+
+    /// <summary>
+    /// The values that produce a clean stack, for the user to type into Parallax DoF.
+    /// </summary>
+    /// <remarks>
+    /// Collapsed by default: the window is already long, and the warning above names the
+    /// one value that matters most without needing this opened.
+    /// </remarks>
+    private void DrawRecommendedSettings()
+    {
+        if (!ImGui.CollapsingHeader("Recommended Parallax DoF settings"))
+        {
+            return;
+        }
+
+        if (ImGui.BeginTable("##recommended", 2, ImGuiTableFlags.SizingStretchProp))
+        {
+            foreach (var (setting, value) in ParallaxDofGuidance.Recommended)
+            {
+                ImGui.TableNextRow();
+                ImGui.TableNextColumn();
+                ImGui.TextUnformatted(setting);
+                ImGui.TableNextColumn();
+
+                // Blur Radius is the one that ruins a stack when left at the default.
+                if (setting == "Blur Radius")
+                {
+                    ImGui.TextColored(Highlight, value);
+                }
+                else
+                {
+                    ImGui.TextUnformatted(value);
+                }
+            }
+
+            ImGui.EndTable();
+        }
+
+        ImGui.PushStyleColor(ImGuiCol.Text, Muted);
+        ImGui.TextWrapped(
+            "Type these into Parallax DoF's own window. This plugin cannot set them: the " +
+            "add-on does not save its settings anywhere the plugin can reach.");
+        ImGui.PopStyleColor();
     }
 
     private void DrawStatus()

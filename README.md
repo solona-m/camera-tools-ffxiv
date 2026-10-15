@@ -144,6 +144,8 @@ The build also runs `tests/IgcsBridgeHarness`, which exercises the add-on bounda
 without needing the game: it registers callbacks the way the plugin does, then discovers
 and calls the exports the way an add-on does. Marshalling mistakes there produce
 plausible-looking garbage rather than a crash, so they are worth catching on the desktop.
+It also checks the aperture warning's logic and wording, by compiling in the two
+Dalamud-free source files that hold them.
 
 ## Status
 
@@ -183,6 +185,12 @@ one-metre aperture. FFXIV's unit is roughly a metre, and Marty's default assumes
 whose units are far smaller. A metre of baseline sees *behind* your subject: you get two
 separate exposures rather than a blur, and no focus setting rescues it, because the
 parallax is real. **0.003 is about three millimetres**, which is a lens.
+
+Parallax DoF does not save its settings anywhere the plugin can reach, so the plugin cannot
+set this for you. What it does instead: whenever an add-on steps the camera more than 0.1
+world units, the plugin window shows a red warning (and posts once to chat) telling you to
+set Blur Radius to 0.003, and the window's "Recommended Parallax DoF settings" section lists
+this table. Keep the two in step — the values live in `ParallaxDofGuidance`.
 
 Watch the plugin's `moved` line while the setup preview runs — it reads the offset in
 world units, and it should equal the blur radius exactly. That is the fastest way to

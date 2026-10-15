@@ -100,7 +100,9 @@ startup work happens in an explicit initialize step.
 
 The only automated test is `tests/IgcsBridgeHarness`, a console program that
 loads `IgcsBridge.dll`, registers callbacks like the plugin does, and calls the
-exports like an add-on does. `build/build.ps1` runs it after building. Game
+exports like an add-on does. It also links in Dalamud-free plugin sources
+(`Igcs/ApertureWatch.cs`, `Igcs/ParallaxDofGuidance.cs`) and checks them; keep
+such files free of Dalamud usings. `build/build.ps1` runs it after building. Game
 behaviour (hooks, camera, freeze) can only be verified in-game via
 `./build/build.ps1 -Deploy`.
 

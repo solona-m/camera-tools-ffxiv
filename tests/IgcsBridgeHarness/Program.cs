@@ -75,6 +75,14 @@ unsafe
     token = register(&callbacks);
 }
 
+// --- The aperture warning ---------------------------------------------------------
+//
+// Ahead of discovery, which returns early when it fails: these need nothing from the shim.
+
+Console.WriteLine();
+Console.WriteLine("Aperture warning");
+ApertureWatchChecks.Run(Check);
+
 // --- The add-on's side: discover by module scan, then drive the camera -------------
 
 nint discovered = nint.Zero;
@@ -128,6 +136,15 @@ unsafe
     Check("multishot up/down", Recorder.LastUpDown == 2.5f, $"got {Recorder.LastUpDown}");
     Check("multishot fov", Recorder.LastFov == 42.5f, $"got {Recorder.LastFov}");
     Check("multishot fromStartPosition", Recorder.LastFromStart == 1, $"got {Recorder.LastFromStart}");
+
+    // Parallax DoF's default Blur Radius, as its setup preview sends it. This proves the
+    // value arrives intact and is judged too large; whether ScreenshotSession hands it to
+    // the watch at all is not something the harness can see.
+    multishot(1f, 0f, 0f, 1);
+    var marshalledWatch = new CameraToolsXIV.Igcs.ApertureWatch();
+    marshalledWatch.Observe(Recorder.LastLeftRight, Recorder.LastUpDown, 0);
+    Check("[AC-blur-radius-warning-1] a default-radius step marshalled through the shim is judged too large",
+        marshalledWatch.Status(0).Warn, $"got {Recorder.LastLeftRight}, {Recorder.LastUpDown}");
 
     multishot(0f, 0f, 0f, 0);
     Check("fromStartPosition false marshals as 0", Recorder.LastFromStart == 0, $"got {Recorder.LastFromStart}");

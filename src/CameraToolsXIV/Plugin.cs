@@ -36,6 +36,7 @@ public sealed class Plugin : IDalamudPlugin
     private readonly IFramework framework;
     private readonly IClientState clientState;
     private readonly IGameInteropProvider interop;
+    private readonly IChatGui chatGui;
     private readonly IPluginLog log;
 
     private WindowSystem? windowSystem;
@@ -58,6 +59,7 @@ public sealed class Plugin : IDalamudPlugin
         IFramework framework,
         IClientState clientState,
         IGameInteropProvider interop,
+        IChatGui chatGui,
         IPluginLog log)
     {
         this.pluginInterface = pluginInterface;
@@ -65,6 +67,7 @@ public sealed class Plugin : IDalamudPlugin
         this.framework = framework;
         this.clientState = clientState;
         this.interop = interop;
+        this.chatGui = chatGui;
         this.log = log;
 
         this.framework.Update += this.OnFrameworkUpdate;
@@ -179,6 +182,22 @@ public sealed class Plugin : IDalamudPlugin
         var freezing = this.session!.Active;
         this.physicsFreeze!.SetFrozen(this.configuration!.FreezePhysicsDuringSession && freezing);
         this.worldPause!.SetPaused(this.configuration.PauseWorldDuringSession && freezing);
+
+        // The session notices an oversized aperture on the render thread, where chat may
+        // not be touched, so it only leaves a note for here. After the freeze and pause, so
+        // that a chat failure cannot cost a stack either of them.
+        if (this.session.TakeApertureAnnouncement() is { } step)
+        {
+            try
+            {
+                this.chatGui.PrintError(ParallaxDofGuidance.ChatMessage(step));
+                this.log.Warning($"Add-on stepped the camera {step:F3} world units; Blur Radius is far too large.");
+            }
+            catch (Exception ex)
+            {
+                this.log.Warning(ex, "Could not post the Blur Radius warning to chat.");
+            }
+        }
 
         // Camera data is published from the camera update itself, not here, so that what
         // the add-on reads always describes the frame about to be rendered.
