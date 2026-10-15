@@ -11,6 +11,25 @@ them. That is the gap this fills. The same interface also enables Otis_Inf's
 [IgcsConnector](https://github.com/FransBouma/IgcsConnector) IGCS DoF, panorama, and
 multishot capture.
 
+## Installing
+
+Add this to Dalamud's custom plugin repositories (`/xlsettings` → Experimental):
+
+```
+https://dl.solona.info/repo.json
+```
+
+Stable releases appear in the list as normal. Enable "Get plugin testing builds" in the
+same settings page only if you want testing builds ahead of them.
+
+You also need [ReShade](https://reshade.me) 6.4 or newer **with add-on support**, plus a
+depth-of-field add-on that speaks IGCS — iMMERSE Parallax DoF, or Otis_Inf's
+[IgcsConnector](https://github.com/FransBouma/IgcsConnector). The plugin does nothing on
+its own; it exists so those can drive the camera.
+
+Type `/camtools` to check the connection. Two green lines mean it worked: the IGCS
+exports are live, and an add-on has found them.
+
 ## How it works
 
 ReShade add-ons discover a camera tool by walking the game process's loaded modules and
@@ -101,25 +120,6 @@ than knowing in advance that chat will be quiet until it finishes. It is bounded
 stack, and released after twenty minutes regardless — long enough to clear any plausible
 render, since a watchdog that fires mid-stack thaws the world for the back half and ruins
 it more thoroughly than never freezing at all.
-
-## Installing
-
-Add this to Dalamud's custom plugin repositories (`/xlsettings` → Experimental):
-
-```
-https://dl.solona.info/repo.json
-```
-
-Stable releases appear in the list as normal. Enable "Get plugin testing builds" in the
-same settings page only if you want testing builds ahead of them.
-
-You also need [ReShade](https://reshade.me) 6.4 or newer **with add-on support**, plus a
-depth-of-field add-on that speaks IGCS — iMMERSE Parallax DoF, or Otis_Inf's
-[IgcsConnector](https://github.com/FransBouma/IgcsConnector). The plugin does nothing on
-its own; it exists so those can drive the camera.
-
-Type `/camtools` to check the connection. Two green lines mean it worked: the IGCS
-exports are live, and an add-on has found them.
 
 ## Building
 
