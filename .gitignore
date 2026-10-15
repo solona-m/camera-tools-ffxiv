@@ -6,3 +6,7 @@ build/obj/
 *.suo
 .vs/
 .idea/
+.review-passed
+.qa-evidence/
+.playwright-mcp/
+.workflow-log/
